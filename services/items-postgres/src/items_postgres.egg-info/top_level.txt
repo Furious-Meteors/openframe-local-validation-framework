@@ -1,5 +1,0 @@
-adapters
-application
-bootstrap
-domain
-entrypoints
