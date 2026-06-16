@@ -85,11 +85,11 @@ echo ""
 # ── swap-demo (port 8005) ───────────────────────────────────────────────────
 echo "--- swap-demo (PERSISTENCE_BACKEND=${PERSISTENCE_BACKEND:-postgres}) ---"
 check "health"           "http://localhost:8005/health"
+check "info"             "http://localhost:8005/info"
 check "create"           "http://localhost:8005/items" \
     "POST" '{"id":"swap-1","name":"Swap Widget","description":"Adapter swap test"}' "201"
 check "get"              "http://localhost:8005/items/swap-1"
 check "list"             "http://localhost:8005/items"
-check "info"             "http://localhost:8005/info"
 check "delete"           "http://localhost:8005/items/swap-1" "DELETE" "" "204"
 echo ""
 
