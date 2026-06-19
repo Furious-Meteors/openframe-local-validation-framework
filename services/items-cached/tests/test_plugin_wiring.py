@@ -80,6 +80,22 @@ async def test_registry_get_cache_returns_redis_plugin():
     assert plugin.capability == "cache"
 
 
+def test_postgres_plugin_registered_with_item_repository_class():
+    """
+    REGRESSION: confirms PostgresPlugin uses
+    repository_class=ItemPostgresRepository. Without this, _row_to_entity()/
+    _entity_to_row() overrides are silently discarded — same root cause as the
+    research-pipeline Mongo bug, masked here because asyncpg.Record's attribute
+    access partially papered over the symptom.
+    See: openframe-adapters CHANGELOG 1.2.0.
+    """
+    source = _get_source()
+    assert "repository_class=ItemPostgresRepository" in source, (
+        "PostgresPlugin must pass repository_class=ItemPostgresRepository "
+        "so get_repository() returns the domain subclass, not the base adapter."
+    )
+
+
 async def test_registry_two_plugins_do_not_collide():
     """Both plugins coexist in the same registry with distinct capability keys."""
     from openframe.core.plugins import PluginRegistry

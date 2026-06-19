@@ -22,7 +22,7 @@ def mock_service():
 def client(mock_service):
     from bootstrap.dependencies import get_swap_item_service
     app.dependency_overrides[get_swap_item_service] = lambda: mock_service
-    with patch("bootstrap.dependencies.init_backends", return_value=None):
+    with patch("entrypoints.http.main.init_backends", new_callable=AsyncMock):
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c, mock_service
     app.dependency_overrides.clear()

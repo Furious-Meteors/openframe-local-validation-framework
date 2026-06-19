@@ -54,16 +54,25 @@ async def initialise() -> None:
     _registry = PluginRegistry()
 
     # 1. MongoDB — artifact persistence
+    # repository_class ensures get_repository() returns ArtifactMongoRepository,
+    # not the plain base MongoRepository. Without this, _doc_to_entity()/_entity_to_doc()
+    # overrides are silently discarded. See: openframe-adapters CHANGELOG 1.2.0.
     _registry.register(MongoPlugin(
         MongoSettings(),
         collection="artifacts",
+        repository_class=ArtifactMongoRepository,
     ))
 
     # 2. Redis — status cache
     _registry.register(RedisPlugin(RedisSettings()))
 
     # 3. Kafka — event bus (producer only; consumer started separately)
-    _registry.register(KafkaPlugin(KafkaSettings()))
+    # producer_class ensures get_producer() returns ArtifactEventProducer,
+    # not the plain base KafkaProducer, so _serialise() override is preserved.
+    _registry.register(KafkaPlugin(
+        KafkaSettings(),
+        producer_class=ArtifactEventProducer,
+    ))
 
     # Initialise all — raises if any backend is unreachable
     await _registry.initialize_all()

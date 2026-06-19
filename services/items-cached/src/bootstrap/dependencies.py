@@ -48,7 +48,16 @@ async def initialise() -> None:
     _registry = PluginRegistry()
 
     # Postgres first — items must be persisted before caching
-    _registry.register(PostgresPlugin(PostgresSettings(), table="items", id_column="id"))
+    # repository_class ensures get_repository() returns ItemPostgresRepository,
+    # not the plain base PostgresRepository. Without this, _row_to_entity()/
+    # _entity_to_row() overrides are silently discarded.
+    # See: openframe-adapters CHANGELOG 1.2.0.
+    _registry.register(PostgresPlugin(
+        PostgresSettings(),
+        table="items",
+        id_column="id",
+        repository_class=ItemPostgresRepository,
+    ))
 
     # Redis second — cache layer depends on persistence being available
     _registry.register(RedisPlugin(RedisSettings()))

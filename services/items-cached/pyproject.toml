@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "openframe-local-validation: Postgres + Redis multi-adapter service (Stage 2)"
 requires-python = ">=3.11"
 dependencies = [
-    "openframe-adapters-db-postgres>=1.1,<2",
+    "openframe-adapters-db-postgres>=1.2,<2",
     "openframe-adapters-db-redis>=1.1,<2",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",

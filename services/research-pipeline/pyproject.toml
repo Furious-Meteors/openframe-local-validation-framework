@@ -8,9 +8,9 @@ version = "0.1.0"
 description = "openframe-local-validation: MongoDB + Redis + Kafka multi-adapter (Stage 2)"
 requires-python = ">=3.11"
 dependencies = [
-    "openframe-adapters-db-mongo>=1.1,<2",
+    "openframe-adapters-db-mongo>=1.2,<2",
     "openframe-adapters-db-redis>=1.1,<2",
-    "openframe-adapters-queue-kafka>=1.1,<2",
+    "openframe-adapters-queue-kafka>=1.2,<2",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "python-dotenv>=1.0",
