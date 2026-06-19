@@ -5,6 +5,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 from openframe.core.testing.fixtures import *  # noqa: F401, F403
 
+
+@pytest.fixture(autouse=True)
+def _test_env(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost/test")
+    monkeypatch.setenv("MONGO_URL", "mongodb://test:test@localhost:27017")
+    monkeypatch.setenv("MONGO_DATABASE", "test")
+
 from domain.swap_item import SwapItem
 
 

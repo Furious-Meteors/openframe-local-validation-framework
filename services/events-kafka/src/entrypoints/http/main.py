@@ -17,6 +17,8 @@ from fastapi import FastAPI
 from openframe.core.middleware import TelemetryMiddleware
 from openframe.core.telemetry import record_lifecycle_event, setup_telemetry
 
+from pydantic import ValidationError
+
 from openframe.core.exceptions import AdapterConnectionError
 
 from src.bootstrap import dependencies
@@ -72,7 +74,7 @@ async def lifespan(app: FastAPI):
         await dependencies.initialise()
         service = dependencies.get_event_service()
         task = asyncio.create_task(_consumer_task(service))
-    except AdapterConnectionError as exc:
+    except (AdapterConnectionError, ValidationError) as exc:
         _logger.warning(
             "Kafka not ready at startup: %s — running in degraded mode", exc
         )

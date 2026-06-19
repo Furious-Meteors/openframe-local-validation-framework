@@ -13,6 +13,9 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
+from pydantic import ValidationError
+
+from openframe.core.exceptions import AdapterConnectionError
 from openframe.core.middleware import TelemetryMiddleware
 from openframe.core.telemetry import record_lifecycle_event, setup_telemetry
 
@@ -58,16 +61,20 @@ async def lifespan(app: FastAPI):
     setup_telemetry()
     record_lifecycle_event("cold_start")
 
-    # Initialise all three plugins — fails fast if any backend is down
-    await dependencies.initialise()
-    _logger.info("research-pipeline: all adapters ready")
-
-    # Start background Kafka consumer
-    dependencies._consumer_task = asyncio.create_task(_consumer_task())
+    task: asyncio.Task | None = None
+    try:
+        await dependencies.initialise()
+        _logger.info("research-pipeline: all adapters ready")
+        task = asyncio.create_task(_consumer_task())
+        dependencies._consumer_task = task
+    except (AdapterConnectionError, ValidationError) as exc:
+        _logger.warning(
+            "research-pipeline: one or more backends not ready at startup: %s "
+            "— running in degraded mode", exc
+        )
 
     yield
 
-    # Shutdown — consumer cancelled, all plugins shut down in LIFO order
     await dependencies.shutdown()
     _logger.info("research-pipeline: shutdown complete")
 

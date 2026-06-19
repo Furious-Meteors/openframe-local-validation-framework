@@ -5,6 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from openframe.core.testing.fixtures import *  # noqa: F401, F403
 
+
+@pytest.fixture(autouse=True)
+def _test_env(monkeypatch):
+    monkeypatch.setenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    monkeypatch.setenv("KAFKA_TOPIC", "test-topic")
+
 from src.domain.order_event import OrderEvent, OrderEventType
 
 
