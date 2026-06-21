@@ -1,13 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "swap-demo"
-version = "0.1.0"
+version = "0.2.0"
+description = "openframe-local-validation: adapter-swap demo — same service, same port, two backends (Stage 1)"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.111",
-    "uvicorn[standard]>=0.29",
-    "asyncpg>=0.29",
-    "motor>=3.4",
-    "pydantic>=2.7",
+    "openframe-adapters-db-postgres>=1.2,<2",
+    "openframe-adapters-db-mongo>=1.2,<2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -18,16 +23,10 @@ dev = [
     "openframe-core[dev]>=2.0,<3",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.package-dir]
-"" = "src"
-
-[tool.setuptools.packages.find]
-where = ["src"]
+pythonpath = ["src"]

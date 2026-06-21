@@ -1,16 +1,51 @@
-from typing import List, Optional
+"""
+PostgreSQL adapter for swap-demo persistence.
+
+Extends PostgresRepository[SwapItem] from openframe-adapters-db-postgres.
+Inherits full CRUD (get, list, create, update, delete, ping, is_ready).
+Adds save() — an UPSERT operation not in BaseRepository — using the
+publicly exported get_postgres_pool() helper.
+"""
+from __future__ import annotations
+
+from typing import Any
 
 import asyncpg
+
+from openframe.adapters.db.postgres import PostgresRepository, get_postgres_pool
 
 from domain.swap_item import SwapItem
 
 
-class PostgresSwapRepository:
-    def __init__(self, pool: asyncpg.Pool) -> None:
-        self._pool = pool
+class PostgresSwapRepository(PostgresRepository[SwapItem]):
+    _table     = "swap_items"
+    _id_column = "id"
+
+    def _row_to_entity(self, row: asyncpg.Record) -> SwapItem:
+        return SwapItem(
+            id=row["id"],
+            name=row["name"],
+            description=row.get("description"),
+            created_at=row.get("created_at"),
+        )
+
+    def _entity_to_row(self, entity: SwapItem) -> dict[str, Any]:
+        return {
+            "id":          entity.id,
+            "name":        entity.name,
+            "description": entity.description,
+        }
 
     async def save(self, item: SwapItem) -> None:
-        async with self._pool.acquire() as conn:
+        """
+        Upsert — insert or update in one statement.
+
+        Domain-specific operation not in BaseRepository.
+        Uses get_postgres_pool() rather than re-opening a connection,
+        so the adapter participates in the same pool managed by PostgresPlugin.
+        """
+        pool = await get_postgres_pool(self._settings)
+        async with pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO swap_items (id, name, description, created_at)
@@ -21,27 +56,3 @@ class PostgresSwapRepository:
                 """,
                 item.id, item.name, item.description,
             )
-
-    async def get(self, item_id: str) -> Optional[SwapItem]:
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id, name, description, created_at FROM swap_items WHERE id = $1",
-                item_id,
-            )
-        if row is None:
-            return None
-        return SwapItem(**dict(row))
-
-    async def list(self) -> List[SwapItem]:
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT id, name, description, created_at FROM swap_items"
-            )
-        return [SwapItem(**dict(r)) for r in rows]
-
-    async def delete(self, item_id: str) -> bool:
-        async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM swap_items WHERE id = $1", item_id
-            )
-        return result != "DELETE 0"
