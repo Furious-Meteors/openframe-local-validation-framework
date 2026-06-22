@@ -1,0 +1,48 @@
+# OpenTelemetry Collector — research-pipeline sidecar
+#
+# Scope: research-pipeline only. Shares that container's network namespace
+# (network_mode: "service:research-pipeline") so localhost:4318 inside
+# research-pipeline resolves directly here — no shared gateway tier.
+#
+# Pipeline: OTLP/HTTP → batch → file (for test assertions) + debug (human log)
+#
+# file_storage is declared so that its queue directory is created on the
+# mounted persistent volume. It is available for future OTLP-backend exporters
+# that support sending_queue; the file exporter writes directly to disk and
+# does not need a separate queue.
+
+extensions:
+  file_storage:
+    directory: /var/otel/queue
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    # Flush every second or when 512 spans accumulate, whichever comes first.
+    # Keeps the output file fresh for test polling without busy-flushing.
+    timeout: 1s
+    send_batch_size: 512
+
+exporters:
+  # Primary output — Stage 8 tests read this file to assert on real spans.
+  file:
+    path: /var/otel/spans.jsonl
+    format: json
+
+  # Human-readable sanity check: `docker compose logs research-pipeline-collector`
+  # shows span names without needing to open the file.
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file, debug]

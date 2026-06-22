@@ -93,4 +93,49 @@ check "list"             "http://localhost:8005/items"
 check "delete"           "http://localhost:8005/items/swap-1" "DELETE" "" "204"
 echo ""
 
+# ── items-cached (port 8006) ─────────────────────────────────────────────────
+echo "--- items-cached ---"
+check "health"           "http://localhost:8006/health"
+check "create item"      "http://localhost:8006/items" \
+    "POST" '{"id":"cached-1","name":"Cached Widget","description":"Cache-aside test","status":"active"}' "201"
+check "get item"         "http://localhost:8006/items/cached-1"
+check "list items"       "http://localhost:8006/items"
+check "delete item"      "http://localhost:8006/items/cached-1" "DELETE" "" "204"
+echo ""
+
+# ── research-pipeline (port 8007) ────────────────────────────────────────────
+echo "--- research-pipeline ---"
+check "health"           "http://localhost:8007/health"
+check "pipeline info"    "http://localhost:8007/pipeline-info"
+check "ingest artifact"  "http://localhost:8007/artifacts" \
+    "POST" '{"id":"rp-1","title":"Sidecar Telemetry Paper","source":"arxiv","tags":["otel","stage8"]}' "201"
+check "get artifact"     "http://localhost:8007/artifacts/rp-1"
+check "list artifacts"   "http://localhost:8007/artifacts"
+check "get status"       "http://localhost:8007/artifacts/rp-1/status"
+echo ""
+
+# ── Stage 8 — sidecar telemetry (requires docker-compose stack) ──────────────
+echo "--- Stage 8: sidecar telemetry (test_observability.py) ---"
+_COLLECTOR_RUNNING=false
+if command -v docker &>/dev/null; then
+    if docker ps --filter "name=openframe-research-pipeline-collector" \
+                 --filter "status=running" \
+                 --format "{{.Names}}" 2>/dev/null \
+        | grep -q "openframe-research-pipeline-collector"; then
+        _COLLECTOR_RUNNING=true
+    fi
+fi
+
+if [ "$_COLLECTOR_RUNNING" = "true" ]; then
+    _STAGE8_DIR="$(cd "$(dirname "$0")/.." && pwd)/services/research-pipeline"
+    python -m pytest "${_STAGE8_DIR}/tests/test_observability.py" -v --tb=short \
+        || fail "Stage 8 test_observability.py failed — see output above"
+    pass "Stage 8 sidecar telemetry tests"
+else
+    echo -e "${RED}✗${NC} openframe-research-pipeline-collector not running — skipping Stage 8 tests"
+    echo "  To run: docker compose -f .docker/docker-compose.yml up -d"
+    echo "  Then re-run: bash scripts/validate_all.sh"
+fi
+echo ""
+
 echo "=== All checks passed ==="
