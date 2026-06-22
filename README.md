@@ -41,7 +41,7 @@ cd services/swap-demo         && pip install -e ".[dev]" && uvicorn entrypoints.
 cd services/items-cached      && pip install -e ".[dev]" && uvicorn src.entrypoints.http.main:app --port 8006 --reload
 cd services/research-pipeline && pip install -e ".[dev]" && uvicorn src.entrypoints.http.main:app --port 8007 --reload
 
-# 4. Run the full validation suite (covers ports 8001–8005)
+# 4. Run the full validation suite (covers ports 8001–8007, Stage 8 requires docker stack)
 bash scripts/validate_all.sh
 ```
 
@@ -57,10 +57,11 @@ bash scripts/validate_all.sh
 | `events-kafka` | 8004 | 1 | `openframe-adapters-queue-kafka` | `KafkaProducer[T]` · `KafkaConsumer[T]` · keyed publish · background consumer |
 | `swap-demo` | 8005 | 1 | Postgres **or** Mongo | Adapter swap via `PERSISTENCE_BACKEND` — same service, two backends |
 | `items-cached` | 8006 | 2 | Postgres + Redis | Cache-aside pattern · `PluginRegistry` two-plugin wiring |
-| `research-pipeline` | 8007 | 2 | Mongo + Redis + Kafka | Three-adapter orchestration · Redis-first status · background consumer |
+| `research-pipeline` | 8007 | 2 + 8 | Mongo + Redis + Kafka | Three-adapter orchestration · Redis-first status · background consumer · **sidecar telemetry** |
 
 **Stage 1** — single adapter, `lru_cache` wiring or `PluginRegistry` with one plugin.  
-**Stage 2** — multiple adapters simultaneously, `PluginRegistry` managing initialisation order, LIFO shutdown, and `health_all()`.
+**Stage 2** — multiple adapters simultaneously, `PluginRegistry` managing initialisation order, LIFO shutdown, and `health_all()`.  
+**Stage 8** — sidecar telemetry validation: one OTel Collector per service (sidecar, not gateway), real OTLP round-trip, file-based span assertions.
 
 ---
 
@@ -153,6 +154,60 @@ def get_item_service() -> ItemCachedService:
 - Aggregated health via `health_all()`
 - Capability-keyed lookup (`"persistence"`, `"cache"`, `"queue"`)
 
+### Stage 8 — sidecar telemetry validation (`research-pipeline`)
+
+Scope: proves that real spans produced by `TelemetryMiddleware` and `TracingProxy` survive a complete OTLP serialize → transmit → collect → file round-trip against a real collector process, not just `InMemorySpanExporter`.
+
+**Mechanism — one sidecar per service, no shared gateway**
+
+`research-pipeline-collector` uses `network_mode: "service:research-pipeline"` in docker-compose. This shares `research-pipeline`'s network namespace so that `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` inside the app resolves directly to the sidecar's listener — no extra network hop, no shared gateway tier.
+
+```
+research-pipeline container
+  ├── app process   → BatchSpanProcessor → OTLP/HTTP → localhost:4318
+  └── (shared loopback)
+research-pipeline-collector container (network_mode: "service:research-pipeline")
+  └── OTLP receiver on 0.0.0.0:4318 → batch processor → file exporter → /var/otel/spans.jsonl
+```
+
+**Cold-start note:** `network_mode: "service:X"` requires `X` to be running first, so the collector starts *after* the app. A few spans produced during those initial seconds are dropped by the SDK's bounded queue. This is expected and acceptable — the design is "bounded loss, never blocking". The app keeps serving traffic regardless of collector availability.
+
+**What Stage 8 proves**
+
+| Assertion | What it validates |
+|---|---|
+| All spans from one request share one `trace_id` | Multi-adapter pooling (Mongo + Redis) holds through a real collector, not just in-memory |
+| Spans include HTTP server span + `repository.artifact.mongo.*` + `repository.artifact.redis.*` | Full pipeline is instrumented end-to-end via `TelemetryMiddleware` and `TracingProxy` |
+| Every span's resource carries `service.name=research-pipeline` | Resource attributes survive the full serialize/transmit/collect round-trip |
+| Test fails loudly if collector container is not running | Prevents vacuously-true "zero spans found" passes |
+
+**Running Stage 8 tests**
+
+```bash
+# Start the full stack including the sidecar
+docker compose -f .docker/docker-compose.yml up -d
+
+# Run Stage 8 integration tests (requires live stack)
+cd services/research-pipeline
+pytest tests/test_observability.py -v
+```
+
+**Resilience check (manual)**
+
+```bash
+# Kill the collector mid-run — pipeline must keep serving traffic
+docker stop openframe-research-pipeline-collector
+curl http://localhost:8007/health   # must still return 200
+```
+
+Confirms that `BatchSpanProcessor`'s bounded queue drops spans on export failure rather than blocking the calling thread.
+
+**Out of scope for Stage 8**
+
+- A shared gateway collector across multiple services (explicitly rejected — sidecar-per-service is the chosen design).
+- A real tracing backend (Jaeger, Tempo, Grafana). File-based assertion is sufficient to prove the mechanism; swapping the exporter target later is a config-only change.
+- Adding sidecars to services other than `research-pipeline` in this pass.
+
 ### Adapter swap — `swap-demo`
 
 `swap-demo` is the clearest proof of the hexagonal contract. `PERSISTENCE_BACKEND` selects the adapter at startup — no code changes anywhere else:
@@ -225,7 +280,7 @@ Both backends return identical HTTP behaviour through the same routes, the same 
 - Graceful degradation: Redis failures never surface to the caller; Postgres remains the source of truth
 - `health_all()` reports both plugins' health independently
 
-### `research-pipeline` — Stage 2 · Mongo + Redis + Kafka
+### `research-pipeline` — Stage 2 · Mongo + Redis + Kafka · Stage 8 sidecar telemetry
 
 - **The most complete Stage 2 service** — three adapters, three capabilities, one registry
 - Registration and initialisation order: Mongo → Redis → Kafka (persistence must be ready before caching, caching before events)
@@ -234,6 +289,7 @@ Both backends return identical HTTP behaviour through the same routes, the same 
 - Redis-first status lookup: `get_status()` checks Redis sub-millisecond cache; falls back to MongoDB on miss
 - Background `asyncio.Task` Kafka consumer updates embedding status in MongoDB and invalidates Redis cache
 - `repository_class=` / `producer_class=` on each plugin registration ensures `get_repository()` / `get_producer()` returns the domain subclass — not the plain base class
+- **Stage 8:** `research-pipeline-collector` sidecar shares the container's network namespace; `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` resolves to the sidecar without any extra network hop; `tests/test_observability.py` asserts real spans via the collector's file exporter output
 
 ---
 
@@ -248,10 +304,19 @@ cd services/cache-redis       && pytest tests/ -v   # 31 tests
 cd services/events-kafka      && pytest tests/ -v   # 26 tests
 cd services/swap-demo         && pytest tests/ -v   # 25 tests
 cd services/items-cached      && pytest tests/ -v   # 60 tests
-cd services/research-pipeline && pytest tests/ -v   # 59 tests
+cd services/research-pipeline && pytest tests/ -v   # 59 tests  (unit, zero network)
 ```
 
-**Total: 296 tests, zero network calls.**
+**Total: 296 unit tests, zero network calls.**
+
+**Stage 8 integration tests** (require the full docker-compose stack including sidecar):
+
+```bash
+# Start stack first
+docker compose -f .docker/docker-compose.yml up -d
+
+cd services/research-pipeline && pytest tests/test_observability.py -v   # 4 tests
+```
 
 Test coverage per service:
 
