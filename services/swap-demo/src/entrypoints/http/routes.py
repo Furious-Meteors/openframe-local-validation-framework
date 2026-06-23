@@ -1,7 +1,7 @@
 import os
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from application.services.swap_item_service import SwapItemService
 from bootstrap.dependencies import get_swap_item_service
@@ -47,9 +47,11 @@ async def get_item(
 
 @router.get("/items", response_model=List[SwapItem])
 async def list_items(
-    svc: SwapItemService = Depends(get_swap_item_service),
+    limit:  int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    svc:    SwapItemService = Depends(get_swap_item_service),
 ) -> List[SwapItem]:
-    return await svc.list()
+    return await svc.list(limit=limit, offset=offset)
 
 
 @router.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)

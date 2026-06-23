@@ -148,6 +148,19 @@ class ResearchPipelineService:
 
         return result
 
+    async def delete_artifact(self, artifact_id: str) -> bool:
+        """
+        Delete artifact from MongoDB and evict its Redis cache entry.
+        Returns True if deleted, False if not found.
+        """
+        deleted = await self._persistence.delete(artifact_id)
+        if deleted:
+            try:
+                await self._cache.delete(f"{_STATUS_KEY}:{artifact_id}")
+            except Exception as exc:
+                _logger.warning("Redis eviction failed (degraded): %s", exc)
+        return deleted
+
     async def list_artifacts(
         self, limit: int = 20, offset: int = 0,
     ) -> tuple[list[ResearchArtifact], int]:

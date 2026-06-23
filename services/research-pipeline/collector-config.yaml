@@ -11,10 +11,6 @@
 # that support sending_queue; the file exporter writes directly to disk and
 # does not need a separate queue.
 
-extensions:
-  file_storage:
-    directory: /var/otel/queue
-
 receivers:
   otlp:
     protocols:
@@ -40,7 +36,6 @@ exporters:
     verbosity: basic
 
 service:
-  extensions: [file_storage]
   pipelines:
     traces:
       receivers: [otlp]

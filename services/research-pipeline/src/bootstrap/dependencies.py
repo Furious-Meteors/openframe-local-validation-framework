@@ -130,7 +130,10 @@ def get_pipeline_service() -> ResearchPipelineService:
         _registry.get("cache").get_repository(),
         prefix="repository.artifact.redis",
     )
-    producer = _registry.get("queue").get_producer()
+    producer = TracingProxy(
+        _registry.get("queue").get_producer(),
+        prefix="queue.event",
+    )
 
     return ResearchPipelineService(
         persistence=persistence,

@@ -71,3 +71,14 @@ async def update_status(
     if result is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id!r} not found")
     return result
+
+
+@router.delete("/{artifact_id}", status_code=204)
+async def delete_artifact(
+    artifact_id: str,
+    service:     ResearchPipelineService = Depends(get_pipeline_service),
+):
+    """Delete artifact from MongoDB and evict its Redis cache entry."""
+    deleted = await service.delete_artifact(artifact_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Artifact {artifact_id!r} not found")

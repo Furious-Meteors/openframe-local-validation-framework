@@ -9,6 +9,8 @@ from fastapi import FastAPI
 from pydantic import ValidationError
 
 from openframe.core.exceptions import AdapterConnectionError
+from openframe.core.middleware import TelemetryMiddleware
+from openframe.core.telemetry import record_lifecycle_event, setup_telemetry
 
 from bootstrap.dependencies import close_backends, init_backends
 from entrypoints.http.routes import router
@@ -19,6 +21,8 @@ _logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    setup_telemetry()
+    record_lifecycle_event("cold_start")
     try:
         await init_backends()
     except (AdapterConnectionError, ValidationError) as exc:
@@ -30,4 +34,5 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="swap-demo", lifespan=lifespan)
+app.add_middleware(TelemetryMiddleware)
 app.include_router(router)

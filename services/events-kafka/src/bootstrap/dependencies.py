@@ -10,6 +10,7 @@ Note: KafkaPlugin.capability = "queue".
 from __future__ import annotations
 
 from openframe.adapters.queue.kafka import KafkaSettings
+from openframe.core.tracing import TracingProxy
 
 from src.adapters.outbound.order_consumer import OrderEventConsumer
 from src.adapters.outbound.order_producer import OrderEventProducer
@@ -33,7 +34,8 @@ async def initialise() -> None:
     _producer = OrderEventProducer(_settings)
     await _producer.start()
 
-    _service = EventService(_producer)
+    traced = TracingProxy(_producer, prefix="queue.event")
+    _service = EventService(traced)
 
 
 async def shutdown() -> None:
