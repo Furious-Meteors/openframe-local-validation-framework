@@ -1,0 +1,42 @@
+# OpenTelemetry Collector — shared sidecar configuration
+#
+# One instance of this config runs per service, inside each service's own
+# sidecar container (network_mode: "service:<app>"). All sidecars are
+# identical — config is shared, data volumes are isolated per service.
+#
+# Customise per-service only if a service needs a different exporter target
+# or sampling strategy. For this validation framework, file-based assertion
+# is sufficient for all services.
+#
+# Pipeline: OTLP/HTTP (localhost:4318) → batch → file + debug
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    # Flush every second or when 512 spans accumulate.
+    # Keeps spans.jsonl fresh for test polling without busy-flushing.
+    timeout: 1s
+    send_batch_size: 512
+
+exporters:
+  # Primary output — test_observability.py reads this to assert on real spans.
+  file:
+    path: /var/otel/spans.jsonl
+    format: json
+
+  # Human-readable sanity check: `docker compose logs <service>-collector`
+  # shows span names without opening the file.
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file, debug]

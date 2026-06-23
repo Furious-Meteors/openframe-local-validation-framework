@@ -1,5 +1,7 @@
 services:
 
+  # ── Infrastructure backends ───────────────────────────────────────────────
+
   postgres:
     image: postgres:16-alpine
     container_name: openframe-postgres
@@ -81,10 +83,243 @@ services:
       retries: 15
       start_period: 30s
 
-  # ── research-pipeline (Stage 2 + Stage 8) ────────────────────────────────
+  # ── Stage 1 services + sidecars ───────────────────────────────────────────
+  #
+  # Sidecar pattern: each collector uses network_mode: "service:<app>" so that
+  # localhost:4318 inside the app resolves directly to the collector — no
+  # separate network hop, no shared gateway.
+  #
+  # Cold-start note: network_mode: "service:X" requires X to exist first, so
+  # the collector always starts after the app. Early spans dropped by the SDK's
+  # bounded queue are expected and acceptable (bounded loss, never blocking).
+
+  # ── items-postgres (port 8001) ─────────────────────────────────────────────
+
+  items-postgres:
+    build:
+      context: ../services/items-postgres
+      dockerfile: Dockerfile
+    container_name: openframe-items-postgres
+    environment:
+      DATABASE_URL:                 postgresql://openframe:openframe@postgres:5432/openframe
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+      OTEL_SERVICE_NAME:            items-postgres
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  items-postgres-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: openframe-items-postgres-collector
+    user: "0"
+    network_mode: "service:items-postgres"
+    command: ["--config=/etc/otel/collector-config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otel/collector-config.yaml:ro
+      - items_postgres_otel_data:/var/otel
+    depends_on:
+      - items-postgres
+
+  # ── artifacts-mongo (port 8002) ────────────────────────────────────────────
+
+  artifacts-mongo:
+    build:
+      context: ../services/artifacts-mongo
+      dockerfile: Dockerfile
+    container_name: openframe-artifacts-mongo
+    environment:
+      MONGO_URL:                    mongodb://openframe:openframe@mongo:27017
+      MONGO_DATABASE:               openframe
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+      OTEL_SERVICE_NAME:            artifacts-mongo
+    ports:
+      - "8002:8002"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  artifacts-mongo-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: openframe-artifacts-mongo-collector
+    user: "0"
+    network_mode: "service:artifacts-mongo"
+    command: ["--config=/etc/otel/collector-config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otel/collector-config.yaml:ro
+      - artifacts_mongo_otel_data:/var/otel
+    depends_on:
+      - artifacts-mongo
+
+  # ── cache-redis (port 8003) ────────────────────────────────────────────────
+
+  cache-redis:
+    build:
+      context: ../services/cache-redis
+      dockerfile: Dockerfile
+    container_name: openframe-cache-redis
+    environment:
+      REDIS_URL:                    redis://redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+      OTEL_SERVICE_NAME:            cache-redis
+    ports:
+      - "8003:8003"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8003/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  cache-redis-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: openframe-cache-redis-collector
+    user: "0"
+    network_mode: "service:cache-redis"
+    command: ["--config=/etc/otel/collector-config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otel/collector-config.yaml:ro
+      - cache_redis_otel_data:/var/otel
+    depends_on:
+      - cache-redis
+
+  # ── events-kafka (port 8004) ───────────────────────────────────────────────
+
+  events-kafka:
+    build:
+      context: ../services/events-kafka
+      dockerfile: Dockerfile
+    container_name: openframe-events-kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS:      kafka:29092
+      KAFKA_TOPIC:                  order-events
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+      OTEL_SERVICE_NAME:            events-kafka
+    ports:
+      - "8004:8004"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8004/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  events-kafka-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: openframe-events-kafka-collector
+    user: "0"
+    network_mode: "service:events-kafka"
+    command: ["--config=/etc/otel/collector-config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otel/collector-config.yaml:ro
+      - events_kafka_otel_data:/var/otel
+    depends_on:
+      - events-kafka
+
+  # ── swap-demo (port 8005) ──────────────────────────────────────────────────
+  # Default backend: postgres. Override with PERSISTENCE_BACKEND=mongo to prove
+  # the adapter swap — same spans, same service.name, different adapter code path.
+
+  swap-demo:
+    build:
+      context: ../services/swap-demo
+      dockerfile: Dockerfile
+    container_name: openframe-swap-demo
+    environment:
+      PERSISTENCE_BACKEND:          postgres
+      DATABASE_URL:                 postgresql://openframe:openframe@postgres:5432/openframe
+      MONGO_URL:                    mongodb://openframe:openframe@mongo:27017
+      MONGO_DATABASE:               openframe
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+      OTEL_SERVICE_NAME:            swap-demo
+    ports:
+      - "8005:8005"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8005/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  swap-demo-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: openframe-swap-demo-collector
+    user: "0"
+    network_mode: "service:swap-demo"
+    command: ["--config=/etc/otel/collector-config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otel/collector-config.yaml:ro
+      - swap_demo_otel_data:/var/otel
+    depends_on:
+      - swap-demo
+
+  # ── Stage 2 services + sidecars ───────────────────────────────────────────
+
+  # ── items-cached (port 8006) ───────────────────────────────────────────────
+
+  items-cached:
+    build:
+      context: ../services/items-cached
+      dockerfile: Dockerfile
+    container_name: openframe-items-cached
+    environment:
+      DATABASE_URL:                 postgresql://openframe:openframe@postgres:5432/openframe
+      REDIS_URL:                    redis://redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+      OTEL_SERVICE_NAME:            items-cached
+    ports:
+      - "8006:8006"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8006/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  items-cached-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: openframe-items-cached-collector
+    user: "0"
+    network_mode: "service:items-cached"
+    command: ["--config=/etc/otel/collector-config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otel/collector-config.yaml:ro
+      - items_cached_otel_data:/var/otel
+    depends_on:
+      - items-cached
+
+  # ── research-pipeline (port 8007) ─────────────────────────────────────────
   # Three-adapter service: MongoDB (persistence) + Redis (cache) + Kafka (queue).
-  # OTEL_EXPORTER_OTLP_ENDPOINT points to localhost:4318 which resolves to the
-  # research-pipeline-collector sidecar sharing this container's network namespace.
+
   research-pipeline:
     build:
       context: ../services/research-pipeline
@@ -96,7 +331,6 @@ services:
       REDIS_URL:                    redis://redis:6379/0
       KAFKA_BOOTSTRAP_SERVERS:      kafka:29092
       KAFKA_TOPIC:                  artifact-events
-      # Resolved to the sidecar via shared network namespace — not a separate hop.
       OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
       OTEL_SERVICE_NAME:            research-pipeline
     ports:
@@ -115,22 +349,17 @@ services:
       retries: 12
       start_period: 60s
 
-  # ── research-pipeline-collector (Stage 8 sidecar) ────────────────────────
-  # Shares research-pipeline's network namespace so localhost:4318 inside
-  # research-pipeline resolves directly to this collector — no extra network hop.
-  #
-  # Cold-start note: the collector starts AFTER research-pipeline (network_mode
-  # requires the target container to exist first). A handful of spans produced
-  # during those first seconds are dropped by the SDK's bounded queue and never
-  # retried. This is expected and acceptable — the design is "bounded loss, never
-  # blocking". research-pipeline keeps serving traffic regardless.
   research-pipeline-collector:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: openframe-research-pipeline-collector
+    user: "0"
     network_mode: "service:research-pipeline"
     command: ["--config=/etc/otel/collector-config.yaml"]
     volumes:
-      - ../services/research-pipeline/collector-config.yaml:/etc/otel/collector-config.yaml:ro
+      # Shared config — identical to all other sidecars.
+      # services/research-pipeline/collector-config.yaml is kept as a
+      # per-service reference copy but this canonical shared version is used.
+      - ./collector-config.yaml:/etc/otel/collector-config.yaml:ro
       - research_pipeline_otel_data:/var/otel
     depends_on:
       - research-pipeline
@@ -140,7 +369,12 @@ volumes:
   mongo_data:
   redis_data:
   kafka_data:
-  # Persistent volume for the research-pipeline sidecar collector.
-  # Holds both the file_storage extension queue directory and the
-  # file exporter output (spans.jsonl). Survives collector restarts.
+  # One isolated OTel data volume per sidecar.
+  # Each holds the file_storage queue directory and the spans.jsonl output.
+  items_postgres_otel_data:
+  artifacts_mongo_otel_data:
+  cache_redis_otel_data:
+  events_kafka_otel_data:
+  swap_demo_otel_data:
+  items_cached_otel_data:
   research_pipeline_otel_data:
