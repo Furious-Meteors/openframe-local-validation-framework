@@ -82,11 +82,17 @@ bash scripts/validate_all.sh
 | `events-kafka` | 8004 | 1 + 8 | `openframe-adapters-queue-kafka` | `KafkaProducer[T]` · `KafkaConsumer[T]` · keyed publish · sidecar OTLP |
 | `swap-demo` | 8005 | 1 + 8 | Postgres **or** Mongo | Adapter swap via `PERSISTENCE_BACKEND` · sidecar OTLP |
 | `items-cached` | 8006 | 2 + 8 | Postgres + Redis | Cache-aside · two-plugin `PluginRegistry` · dual-adapter trace pooling |
-| `research-pipeline` | 8007 | 2 + 8 | Mongo + Redis + Kafka | Three-adapter orchestration · triple-adapter trace pooling · sidecar OTLP |
+| `research-pipeline` | 8007 | 2 + 8 | Mongo + Redis + Kafka | Three-adapter orchestration via `ApplicationBootstrap` · triple-adapter trace pooling · sidecar OTLP |
 
 **Stage 1** — single adapter, `lru_cache` wiring or `PluginRegistry` with one plugin.  
-**Stage 2** — multiple adapters simultaneously, `PluginRegistry` managing initialisation order, LIFO shutdown, and `health_all()`.  
+**Stage 2** — multiple adapters simultaneously. `items-cached` uses `PluginRegistry` directly; `research-pipeline` uses `ApplicationBootstrap` (see below) — the recommended composition root as of openframe-core 3.1.0, wrapping `PluginRegistry` with a structured `configure → start → stop` lifecycle and correct shutdown ordering.  
 **Stage 8** — sidecar telemetry: every service has its own OTel Collector sidecar (not a shared gateway), real OTLP round-trip, file-based span assertions proving resource attributes survive end-to-end.
+
+**`research-pipeline` and `ApplicationBootstrap`** — research-pipeline is the canonical proof of `ApplicationBootstrap`'s multi-adapter lifecycle, migrated ahead of `openframe-cli` scaffolding it as the default. `src/bootstrap/app.py` defines `ResearchPipelineApp(ApplicationBootstrap)`, registering Mongo → Redis → Kafka in `configure()`. This one service now demonstrates, in combination, everything Stage 8 validates:
+  a. `ApplicationBootstrap`'s `configure → start → stop` lifecycle, including LIFO port shutdown and aggregated `health()`
+  b. `shutdown_telemetry()` integration inside `ApplicationBootstrap.stop()` — spans emitted during port shutdown are flushed before the TracerProvider itself is torn down
+  c. The sidecar collector receiving real spans over a real OTLP network round-trip (`test_ingest_produces_spans_with_single_trace_id`, `test_ingest_produces_http_and_adapter_spans`)
+  d. Collector failure injection — the sidecar container is actually stopped mid-test to prove the bounded `BatchSpanProcessor` queue drops spans rather than blocking or crashing the pipeline (`test_bounded_queue_drop_not_crash_on_collector_failure`)
 
 ---
 
@@ -155,7 +161,7 @@ def get_item_service() -> ItemService:
 
 ### Stage 2 — multiple adapters (`PluginRegistry`)
 
-Used by: `items-cached`, `research-pipeline`
+Used by: `items-cached`
 
 ```python
 # bootstrap/dependencies.py — items-cached pattern
@@ -174,10 +180,45 @@ def get_item_service() -> ItemCachedService:
 ```
 
 `PluginRegistry` guarantees:
-- Initialisation in registration order (Postgres → Redis in `items-cached`; Mongo → Redis → Kafka in `research-pipeline`)
+- Initialisation in registration order
 - Shutdown in reverse order (LIFO)
 - Aggregated health via `health_all()`
 - Capability-keyed lookup (`"persistence"`, `"cache"`, `"queue"`)
+
+### Stage 2 — multiple adapters (`ApplicationBootstrap`)
+
+Used by: `research-pipeline`
+
+As of openframe-core 3.1.0, `ApplicationBootstrap` (in `openframe.core.runtime`) is the recommended composition root for multi-adapter services — it wraps `PluginRegistry` with a structured `configure → start → stop` lifecycle and handles shutdown ordering automatically: ports are shut down first (LIFO), then `shutdown_telemetry()` flushes the OTel SDK so spans emitted during port shutdown are not silently dropped.
+
+```python
+# bootstrap/app.py — research-pipeline pattern
+class ResearchPipelineApp(ApplicationBootstrap):
+    def configure(self) -> None:
+        self.register(MongoPlugin(MongoSettings(), collection="artifacts",
+                                   repository_class=ArtifactMongoRepository))
+        self.register(RedisPlugin(RedisSettings()))
+        self.register(KafkaPlugin(KafkaSettings(), producer_class=ArtifactEventProducer))
+
+    async def stop(self) -> None:
+        await self.stop_consumer()
+        await super().stop()          # shuts down ports LIFO, flushes telemetry
+        from openframe.core.telemetry import shutdown_telemetry
+        shutdown_telemetry()          # after super().stop() — captures shutdown-time spans too
+
+# bootstrap/dependencies.py — FastAPI Depends() layer, reads from the app instance
+_app = ResearchPipelineApp()
+
+def get_pipeline_service() -> ResearchPipelineService:
+    persistence = TracingProxy(_app.get(Capability.PERSISTENCE).get_repository(), ...)
+    cache       = TracingProxy(_app.get(Capability.CACHE).get_repository(), ...)
+    return ResearchPipelineService(persistence=persistence, cache=cache, ...)
+```
+
+`ApplicationBootstrap` guarantees the same ordering/health/capability-lookup behaviour as `PluginRegistry` (which it wraps), plus:
+- A single `start()`/`stop()` entry point instead of manually sequencing `initialize_all()`/`shutdown_all()`
+- `Capability`-typed lookup (`Capability.PERSISTENCE` etc.) instead of raw strings
+- Guaranteed `shutdown_telemetry()` on every `stop()`, so services can't forget to flush spans
 
 ### Stage 8 — sidecar telemetry validation (all services)
 
@@ -485,16 +526,16 @@ Both backends return identical HTTP behaviour through the same routes, the same 
 - `health_all()` reports both plugins' health independently
 - **Stage 8:** `items-cached-collector` sidecar; `test_observability.py` asserts ≥3 spans (HTTP + Postgres + Redis) under one trace_id — proving two-adapter pooling through the real sidecar
 
-### `research-pipeline` — Stage 2 · Mongo + Redis + Kafka · Stage 8 sidecar telemetry
+### `research-pipeline` — Stage 2 · Mongo + Redis + Kafka · `ApplicationBootstrap` · Stage 8 sidecar telemetry
 
-- **The most complete Stage 2 service** — three adapters, three capabilities, one registry
+- **The most complete Stage 2 service** — three adapters, three capabilities, one `ApplicationBootstrap` subclass (`ResearchPipelineApp` in `src/bootstrap/app.py`)
 - Registration and initialisation order: Mongo → Redis → Kafka (persistence must be ready before caching, caching before events)
-- Shutdown order: Kafka → Redis → Mongo (LIFO — events stop first, connections close last)
+- Shutdown order: Kafka → Redis → Mongo (LIFO, handled by `ApplicationBootstrap.stop()`), then `shutdown_telemetry()` flushes the OTel SDK last of all
 - Three-step ingest flow: `store (Mongo)` → `publish event (Kafka)` → `cache status (Redis)`
 - Redis-first status lookup: `get_status()` checks Redis sub-millisecond cache; falls back to MongoDB on miss
-- Background `asyncio.Task` Kafka consumer updates embedding status in MongoDB and invalidates Redis cache
+- Background `asyncio.Task` Kafka consumer, lifecycle owned by `ResearchPipelineApp.start_consumer()`/`stop_consumer()`, updates embedding status in MongoDB and invalidates Redis cache
 - `repository_class=` / `producer_class=` on each plugin registration ensures `get_repository()` / `get_producer()` returns the domain subclass — not the plain base class
-- **Stage 8:** sidecar on shared network namespace; `TracingProxy` on Mongo, Redis, **and Kafka producer**; tests assert ≥3 correlated spans and collector-failure resilience (`test_collector_failure_does_not_crash_pipeline`)
+- **Stage 8:** sidecar on shared network namespace; `TracingProxy` on Mongo, Redis, **and Kafka producer**; tests assert ≥3 correlated spans and genuine collector-failure resilience — `test_bounded_queue_drop_not_crash_on_collector_failure` actually stops the sidecar container mid-test and confirms the pipeline keeps serving traffic
 
 ---
 
@@ -509,10 +550,10 @@ cd services/cache-redis       && pytest tests/ -v   # 31 tests
 cd services/events-kafka      && pytest tests/ -v   # 26 tests
 cd services/swap-demo         && pytest tests/ -v   # 25 tests
 cd services/items-cached      && pytest tests/ -v   # 60 tests
-cd services/research-pipeline && pytest tests/ -v   # 59 tests  (unit, zero network)
+cd services/research-pipeline && pytest tests/ -v   # 67 tests  (unit, zero network)
 ```
 
-**Total: 296 unit tests, zero network calls.**
+**Total: 304 unit tests, zero network calls.**
 
 **Stage 8 integration tests** (require the full docker-compose stack — all sidecars, 29 tests total):
 
@@ -528,9 +569,9 @@ cd services/items-postgres    && pytest tests/test_observability.py -v   # 4 tes
 cd services/artifacts-mongo   && pytest tests/test_observability.py -v   # 4 tests
 cd services/cache-redis       && pytest tests/test_observability.py -v   # 4 tests
 cd services/events-kafka      && pytest tests/test_observability.py -v   # 4 tests
-cd services/swap-demo         && pytest tests/test_observability.py -v   # 4 tests
+cd services/swap-demo         && pytest tests/test_observability.py -v   # 5 tests (includes backend-flip consistency check)
 cd services/items-cached      && pytest tests/test_observability.py -v   # 5 tests (dual-adapter assertion)
-cd services/research-pipeline && pytest tests/test_observability.py -v   # 5 tests (resilience + triple-adapter)
+cd services/research-pipeline && pytest tests/test_observability.py -v   # 5 tests (collector failure injection + triple-adapter)
 
 # Or run all HTTP + Stage 8 checks:
 bash scripts/validate_all.sh

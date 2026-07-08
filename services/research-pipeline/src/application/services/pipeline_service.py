@@ -16,6 +16,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from openframe.core.ports import PluginStatus
+
 from src.application.ports.artifact_repository import ArtifactRepositoryPort
 from src.application.ports.event_publisher     import EventPublisherPort
 from src.domain.artifact import ArtifactEvent, EmbeddingStatus, ResearchArtifact
@@ -167,7 +169,9 @@ class ResearchPipelineService:
         return await self._persistence.list(limit=limit, offset=offset)
 
     async def health(self) -> dict:
+        mongodb_health = await self._persistence.health()
+        redis_health = await self._cache.health()
         return {
-            "mongodb_ping": await self._persistence.ping(),
-            "redis_ping":   await self._cache.ping(),
+            "mongodb_ping": mongodb_health.status == PluginStatus.READY,
+            "redis_ping":   redis_health.status == PluginStatus.READY,
         }

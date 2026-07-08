@@ -7,6 +7,8 @@ before create()) discovered during live Docker validation.
 from __future__ import annotations
 
 import pytest
+from openframe.core.ports import PluginHealth, PluginStatus
+
 from src.domain.item import Item
 
 
@@ -206,10 +208,8 @@ async def test_list_items_reads_from_persistence_only(
 # ── health() ────────────────────────────────────────────────────────────────
 
 async def test_health_checks_both_backends(service, mock_persistence, mock_cache):
-    mock_persistence.ping.return_value     = True
-    mock_persistence.is_ready.return_value = True
-    mock_cache.ping.return_value           = True
-    mock_cache.is_ready.return_value       = True
+    mock_persistence.health.return_value = PluginHealth(status=PluginStatus.READY)
+    mock_cache.health.return_value       = PluginHealth(status=PluginStatus.READY)
     result = await service.health()
     assert result == {
         "postgres_ping":  True, "postgres_ready": True,

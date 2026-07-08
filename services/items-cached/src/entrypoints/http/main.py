@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from openframe.core.exceptions import AdapterConnectionError
 from openframe.core.middleware import TelemetryMiddleware
-from openframe.core.telemetry import record_lifecycle_event, setup_telemetry
+from openframe.core.telemetry import record_lifecycle_event, setup_telemetry, shutdown_telemetry
 
 from src.bootstrap import dependencies
 from src.entrypoints.http.routes import router
@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
 
     await dependencies.shutdown()
     _logger.info("items-cached: shutdown complete")
+    shutdown_telemetry()
 
 
 app = FastAPI(

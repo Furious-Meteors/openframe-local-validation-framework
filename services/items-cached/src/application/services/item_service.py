@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from openframe.core.ports import PluginStatus
+
 from src.application.ports.item_repository import ItemRepositoryPort
 from src.domain.item import Item
 
@@ -113,9 +115,13 @@ class ItemCachedService:
 
     async def health(self) -> dict:
         """Health check across both adapters."""
+        postgres_health = await self._persistence.health()
+        redis_health = await self._cache.health()
+        postgres_ready = postgres_health.status == PluginStatus.READY
+        redis_ready = redis_health.status == PluginStatus.READY
         return {
-            "postgres_ping":  await self._persistence.ping(),
-            "postgres_ready": await self._persistence.is_ready(),
-            "redis_ping":     await self._cache.ping(),
-            "redis_ready":    await self._cache.is_ready(),
+            "postgres_ping":  postgres_ready,
+            "postgres_ready": postgres_ready,
+            "redis_ping":     redis_ready,
+            "redis_ready":    redis_ready,
         }

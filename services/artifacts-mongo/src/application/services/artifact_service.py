@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from openframe.core.ports import PluginStatus
+
 from src.application.ports.artifact_repository import ArtifactRepositoryPort
 from src.domain.artifact import EmbeddingStatus, ResearchArtifact
 
@@ -53,7 +55,6 @@ class ArtifactService:
         return await self._repo.filter_by_tags(tags)
 
     async def health(self) -> dict:
-        return {
-            "ping":     await self._repo.ping(),
-            "is_ready": await self._repo.is_ready(),
-        }
+        health = await self._repo.health()
+        ready = health.status == PluginStatus.READY
+        return {"ping": ready, "is_ready": ready}

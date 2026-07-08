@@ -12,8 +12,7 @@ import pytest
 import asyncpg
 
 from openframe.core.exceptions import AdapterQueryError, AdapterTimeoutError
-from openframe.core.health import HealthCheck
-from openframe.core.ports import BaseRepository
+from openframe.core.ports import BaseRepository, Lifecycle
 
 from src.domain.item import Item
 
@@ -27,7 +26,7 @@ def test_pg_adapter_satisfies_base_repository(pg_adapter):
 
 def test_pg_adapter_satisfies_health_check(pg_adapter):
     repo, _ = pg_adapter
-    assert isinstance(repo, HealthCheck)
+    assert isinstance(repo, Lifecycle)
 
 
 def test_pg_table_is_items(pg_adapter):
@@ -116,7 +115,7 @@ def test_redis_adapter_satisfies_base_repository(redis_adapter):
 
 def test_redis_adapter_satisfies_health_check(redis_adapter):
     repo, _ = redis_adapter
-    assert isinstance(repo, HealthCheck)
+    assert isinstance(repo, Lifecycle)
 
 
 def test_redis_dict_to_entity(redis_adapter):

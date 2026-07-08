@@ -1,5 +1,5 @@
 """
-Tests for plugin registration in bootstrap/dependencies.py.
+Tests for plugin registration in bootstrap/app.py (ResearchPipelineApp.configure()).
 
 Regression tests for the repository_class/producer_class fix introduced
 in openframe-adapters 1.2.0. Without these parameters, get_repository()
@@ -13,13 +13,13 @@ import pathlib
 
 import pytest
 
-_DEPS = (
-    pathlib.Path(__file__).parent.parent / "src" / "bootstrap" / "dependencies.py"
+_APP = (
+    pathlib.Path(__file__).parent.parent / "src" / "bootstrap" / "app.py"
 )
 
 
 def _source() -> str:
-    return _DEPS.read_text()
+    return _APP.read_text()
 
 
 # ── REGRESSION: repository_class / producer_class source-level checks ────────

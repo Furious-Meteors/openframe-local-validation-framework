@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from openframe.core.health import HealthCheck
-from openframe.core.ports import BaseRepository
+from openframe.core.ports import BaseRepository, Lifecycle
 
 from src.adapters.outbound.artifact_repository import ArtifactMongoRepository
 from src.domain.artifact import EmbeddingStatus, ResearchArtifact
@@ -15,7 +14,7 @@ def test_adapter_satisfies_base_repository(adapter):
 
 def test_adapter_satisfies_health_check(adapter):
     repo, _, _ = adapter
-    assert isinstance(repo, HealthCheck)
+    assert isinstance(repo, Lifecycle)
 
 
 def test_collection_name_is_artifacts(adapter):

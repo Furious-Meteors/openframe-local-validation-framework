@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from openframe.core.ports import PluginHealth, PluginStatus
 from openframe.core.testing.fixtures import *  # noqa: F401, F403
 
 from src.domain.artifact import ArtifactEvent, EmbeddingStatus, ResearchArtifact
@@ -53,8 +54,7 @@ def mock_persistence():
     repo.create   = AsyncMock()
     repo.update   = AsyncMock(return_value=None)
     repo.delete   = AsyncMock(return_value=False)
-    repo.ping     = AsyncMock(return_value=True)
-    repo.is_ready = AsyncMock(return_value=True)
+    repo.health   = AsyncMock(return_value=PluginHealth(status=PluginStatus.READY))
     return repo
 
 
@@ -67,8 +67,7 @@ def mock_cache():
     repo.create   = AsyncMock()
     repo.update   = AsyncMock(return_value=None)
     repo.delete   = AsyncMock(return_value=False)
-    repo.ping     = AsyncMock(return_value=True)
-    repo.is_ready = AsyncMock(return_value=True)
+    repo.health   = AsyncMock(return_value=PluginHealth(status=PluginStatus.READY))
     return repo
 
 

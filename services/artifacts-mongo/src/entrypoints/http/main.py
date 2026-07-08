@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from openframe.core.middleware import TelemetryMiddleware
-from openframe.core.telemetry import record_lifecycle_event, setup_telemetry
+from openframe.core.telemetry import record_lifecycle_event, setup_telemetry, shutdown_telemetry
 
 from src.bootstrap.dependencies import _get_settings, get_artifact_service
 from src.entrypoints.http.routes import router
@@ -21,6 +21,7 @@ async def lifespan(app: FastAPI):
     record_lifecycle_event("cold_start")
     _get_settings()
     yield
+    shutdown_telemetry()
 
 
 app = FastAPI(

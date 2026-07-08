@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import pathlib
 import subprocess
 import tempfile
 import time
@@ -21,11 +22,18 @@ import httpx
 import pytest
 
 SERVICE_URL         = "http://localhost:8005"
+SWAP_SERVICE        = "swap-demo"
 COLLECTOR_CONTAINER = "openframe-swap-demo-collector"
 SPANS_FILE          = "/var/otel/spans.jsonl"
 EXPECTED_SERVICE    = "swap-demo"
 POLL_TIMEOUT_S      = 30
 POLL_INTERVAL_S     = 0.5
+
+COMPOSE_FILE = (
+    pathlib.Path(__file__).resolve().parents[3] / ".docker" / "docker-compose.yml"
+)
+BACKEND_RESTART_TIMEOUT_S = 90
+BACKEND_HEALTH_TIMEOUT_S  = 60
 
 
 def _require_collector_running() -> None:
@@ -175,3 +183,102 @@ def test_at_least_http_and_adapter_span_present():
     assert spans, (
         f"No correlated trace (HTTP + adapter) appeared within {POLL_TIMEOUT_S}s."
     )
+
+
+# ── backend-flip helpers ─────────────────────────────────────────────────────
+#
+# test_resource_attributes_carry_service_name() above only proves service.name
+# for whichever backend happens to be active when the suite runs — it never
+# flips PERSISTENCE_BACKEND and re-checks. test_service_name_consistent_across_
+# both_backends() below closes that gap by actually restarting the swap-demo
+# container under both backends in one test run.
+
+def _restart_with_backend(backend: str) -> None:
+    """Recreate the swap-demo container with PERSISTENCE_BACKEND=<backend>."""
+    env = {**os.environ, "PERSISTENCE_BACKEND": backend}
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--no-deps", SWAP_SERVICE],
+        capture_output=True, text=True, timeout=BACKEND_RESTART_TIMEOUT_S, env=env,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"Failed to restart {SWAP_SERVICE} with PERSISTENCE_BACKEND={backend}: "
+            f"{result.stderr.strip()}"
+        )
+    _wait_for_health()
+
+    # Recreating swap-demo gives it a new container ID. The collector's
+    # network_mode: service:swap-demo is resolved to a container ID at the
+    # collector's own creation time and does not follow the app across a
+    # `--no-deps` recreate, so it must be force-recreated here too or it is
+    # left attached to the now-dead network namespace and never sees spans.
+    collector_result = subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d",
+         "--no-deps", "--force-recreate", f"{SWAP_SERVICE}-collector"],
+        capture_output=True, text=True, timeout=BACKEND_RESTART_TIMEOUT_S, env=env,
+    )
+    if collector_result.returncode != 0:
+        pytest.fail(
+            f"Failed to recreate {SWAP_SERVICE}-collector after backend switch: "
+            f"{collector_result.stderr.strip()}"
+        )
+
+
+def _wait_for_health(timeout_s: float = BACKEND_HEALTH_TIMEOUT_S) -> None:
+    deadline = time.monotonic() + timeout_s
+    last_error = "no attempt made"
+    while time.monotonic() < deadline:
+        try:
+            with httpx.Client(base_url=SERVICE_URL, timeout=5.0) as client:
+                r = client.get("/health")
+            if r.status_code == 200:
+                return
+            last_error = f"status={r.status_code}"
+        except httpx.HTTPError as exc:
+            last_error = str(exc)
+        time.sleep(1.0)
+    pytest.fail(
+        f"{SWAP_SERVICE} did not become healthy within {timeout_s}s "
+        f"after a backend restart: {last_error}"
+    )
+
+
+def test_service_name_consistent_across_both_backends():
+    """
+    Prove service.name = 'swap-demo' for BOTH postgres and mongo backends by
+    restarting the service with each PERSISTENCE_BACKEND value and asserting
+    the span resource attribute is identical.
+
+    Uses docker compose to recreate the swap-demo container under each
+    backend, then reuses the same span-collection helpers as the rest of
+    this file. Restores PERSISTENCE_BACKEND=postgres in a finally block so a
+    failed assertion never leaves the stack on a non-default backend.
+    """
+    _require_collector_running()
+
+    observed: dict[str, set[str]] = {}
+    try:
+        for backend in ("postgres", "mongo"):
+            _restart_with_backend(backend)
+            before_ids = _snapshot_span_ids()
+            r = _create_item()
+            assert r.status_code == 201, (
+                f"Expected 201 with PERSISTENCE_BACKEND={backend}, "
+                f"got {r.status_code}: {r.text}"
+            )
+            spans = _poll_for_new_spans(before_ids)
+            assert spans, (
+                f"No new spans appeared within {POLL_TIMEOUT_S}s "
+                f"with PERSISTENCE_BACKEND={backend}."
+            )
+            observed[backend] = {
+                span["_resource_attrs"].get("service.name", "") for span in spans
+            }
+    finally:
+        _restart_with_backend("postgres")
+
+    for backend, names in observed.items():
+        assert names == {EXPECTED_SERVICE}, (
+            f"PERSISTENCE_BACKEND={backend}: expected every span tagged "
+            f"service.name={EXPECTED_SERVICE!r}, got {names}."
+        )

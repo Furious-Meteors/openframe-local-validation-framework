@@ -248,17 +248,84 @@ def test_resource_attributes_carry_service_name():
         )
 
 
-def test_collector_failure_does_not_crash_pipeline():
+def _docker_stop_collector() -> None:
+    result = subprocess.run(
+        ["docker", "stop", COLLECTOR_CONTAINER],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"Failed to stop collector '{COLLECTOR_CONTAINER}': {result.stderr.strip()}"
+        )
+
+
+def _docker_start_collector() -> None:
+    result = subprocess.run(
+        ["docker", "start", COLLECTOR_CONTAINER],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"Failed to restart collector '{COLLECTOR_CONTAINER}': {result.stderr.strip()}"
+        )
+
+
+def _wait_for_collector_running(timeout_s: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["docker", "ps",
+             "--filter", f"name={COLLECTOR_CONTAINER}",
+             "--filter", "status=running",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if COLLECTOR_CONTAINER in result.stdout:
+            return
+        time.sleep(1.0)
+    pytest.fail(
+        f"Collector '{COLLECTOR_CONTAINER}' did not report running again within "
+        f"{timeout_s}s after restart."
+    )
+
+
+def test_bounded_queue_drop_not_crash_on_collector_failure():
     """
-    The pipeline health endpoint must return 200 — it must not depend on
-    the collector being healthy in the request path.
+    Stop the sidecar collector container, send several requests, confirm the
+    pipeline keeps serving traffic (does not crash, does not hang, does not
+    return 5xx), then restart the collector.
+
+    This proves the bounded BatchSpanProcessor queue silently drops spans and
+    keeps the app process running — the central resilience claim of the
+    sidecar telemetry architecture. A prior version of this test only checked
+    that /health returned 200 while the collector was still running, which
+    never exercised the failure path at all.
     """
     _require_collector_running()
-    with httpx.Client(base_url=PIPELINE_URL, timeout=10.0) as client:
-        r = client.get("/health")
-    assert r.status_code == 200, (
-        f"/health returned {r.status_code}. The pipeline health endpoint must "
-        "not depend on the collector being healthy."
-    )
-    body = r.json()
-    assert body.get("status") == "ok", f"Unexpected health body: {body}"
+
+    try:
+        _docker_stop_collector()
+
+        with httpx.Client(base_url=PIPELINE_URL, timeout=2.0) as client:
+            for i in range(5):
+                response = client.post(
+                    "/artifacts",
+                    json={
+                        "id":     f"stage8-collector-down-{uuid.uuid4().hex[:8]}",
+                        "title":  "Collector Failure Injection Test",
+                        "source": "test-suite",
+                        "tags":   ["stage8", "resilience"],
+                    },
+                )
+                assert response.status_code < 500, (
+                    f"Request {i + 1}/5 returned {response.status_code} with the "
+                    f"collector down — the app must not fail requests when the "
+                    f"sidecar is unreachable: {response.text}"
+                )
+    finally:
+        _docker_start_collector()
+        _wait_for_collector_running()
+
+    # Confirm the collector is genuinely back up and reachable, not just
+    # reported "running" by the Docker API a moment too early.
+    _require_collector_running()

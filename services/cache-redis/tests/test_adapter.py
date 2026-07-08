@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from openframe.core.health import HealthCheck
-from openframe.core.ports import BaseRepository
+from openframe.core.ports import BaseRepository, Lifecycle
 
 from src.adapters.outbound.session_repository import SessionRedisRepository
 from src.domain.session import Session
@@ -15,7 +14,7 @@ def test_adapter_satisfies_base_repository(adapter):
 
 def test_adapter_satisfies_health_check(adapter):
     repo, _, _ = adapter
-    assert isinstance(repo, HealthCheck)
+    assert isinstance(repo, Lifecycle)
 
 
 def test_dict_to_entity(adapter, session_factory):

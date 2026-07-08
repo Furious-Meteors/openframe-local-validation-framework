@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from openframe.core.exceptions import AdapterConnectionError
 from openframe.core.middleware import TelemetryMiddleware
-from openframe.core.telemetry import record_lifecycle_event, setup_telemetry
+from openframe.core.telemetry import record_lifecycle_event, setup_telemetry, shutdown_telemetry
 
 from bootstrap.dependencies import close_backends, init_backends
 from entrypoints.http.routes import router
@@ -31,6 +31,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     yield
     await close_backends()
+    shutdown_telemetry()
 
 
 app = FastAPI(title="swap-demo", lifespan=lifespan)

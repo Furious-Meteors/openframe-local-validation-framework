@@ -7,6 +7,8 @@ status pattern, and graceful degradation when Kafka or Redis fails.
 from __future__ import annotations
 
 import pytest
+from openframe.core.ports import PluginHealth, PluginStatus
+
 from src.domain.artifact import ArtifactEvent, EmbeddingStatus, ResearchArtifact
 
 
@@ -204,8 +206,8 @@ async def test_list_artifacts_reads_from_persistence_only(
 async def test_health_checks_persistence_and_cache(
     service, mock_persistence, mock_cache
 ):
-    mock_persistence.ping.return_value = True
-    mock_cache.ping.return_value       = True
+    mock_persistence.health.return_value = PluginHealth(status=PluginStatus.READY)
+    mock_cache.health.return_value       = PluginHealth(status=PluginStatus.READY)
     result = await service.health()
     assert result == {"mongodb_ping": True, "redis_ping": True}
 

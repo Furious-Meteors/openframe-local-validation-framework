@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+from openframe.core.ports import PluginHealth, PluginStatus
+
 from src.domain.item import Item
 from src.application.services.item_service import ItemService
 
@@ -94,10 +96,15 @@ async def test_bulk_import_delegates_to_repo(service, mock_repo, item_factory):
 
 
 async def test_health_returns_ping_and_ready(service, mock_repo):
-    mock_repo.ping.return_value = True
-    mock_repo.is_ready.return_value = True
+    mock_repo.health.return_value = PluginHealth(status=PluginStatus.READY)
     result = await service.health()
     assert result == {"ping": True, "is_ready": True}
+
+
+async def test_health_returns_false_when_not_ready(service, mock_repo):
+    mock_repo.health.return_value = PluginHealth(status=PluginStatus.FAILED, message="down")
+    result = await service.health()
+    assert result == {"ping": False, "is_ready": False}
 
 
 async def test_service_no_adapter_imports():

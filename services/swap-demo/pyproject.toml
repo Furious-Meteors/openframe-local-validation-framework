@@ -8,8 +8,8 @@ version = "0.2.0"
 description = "openframe-local-validation: adapter-swap demo — same service, same port, two backends (Stage 1)"
 requires-python = ">=3.11"
 dependencies = [
-    "openframe-adapters-db-postgres>=1.2,<2",
-    "openframe-adapters-db-mongo>=1.2,<2",
+    "openframe-adapters-db-postgres>=2.0,<3",
+    "openframe-adapters-db-mongo>=2.0,<3",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "python-dotenv>=1.0",
@@ -20,7 +20,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
-    "openframe-core[dev]>=2.0,<3",
+    "openframe-core[dev]>=3.0,<4",
 ]
 
 [tool.hatch.build.targets.wheel]

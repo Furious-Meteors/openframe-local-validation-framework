@@ -8,8 +8,7 @@ from __future__ import annotations
 import json
 import pytest
 
-from openframe.core.health import HealthCheck
-from openframe.core.ports import BaseProducer, BaseRepository
+from openframe.core.ports import BaseProducer, BaseRepository, Lifecycle
 
 from src.domain.artifact import EmbeddingStatus, ResearchArtifact
 
@@ -23,7 +22,7 @@ def test_mongo_adapter_satisfies_base_repository(mongo_adapter):
 
 def test_mongo_adapter_satisfies_health_check(mongo_adapter):
     repo, _, _ = mongo_adapter
-    assert isinstance(repo, HealthCheck)
+    assert isinstance(repo, Lifecycle)
 
 
 def test_mongo_collection_name(mongo_adapter):
@@ -60,7 +59,7 @@ def test_redis_adapter_satisfies_base_repository(redis_adapter):
 
 def test_redis_adapter_satisfies_health_check(redis_adapter):
     repo, _ = redis_adapter
-    assert isinstance(repo, HealthCheck)
+    assert isinstance(repo, Lifecycle)
 
 
 def test_redis_dict_to_entity_minimal_fields(redis_adapter):

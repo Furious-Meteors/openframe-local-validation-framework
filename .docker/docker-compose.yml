@@ -236,8 +236,11 @@ services:
       - events-kafka
 
   # ── swap-demo (port 8005) ──────────────────────────────────────────────────
-  # Default backend: postgres. Override with PERSISTENCE_BACKEND=mongo to prove
-  # the adapter swap — same spans, same service.name, different adapter code path.
+  # Default backend: postgres. Override with PERSISTENCE_BACKEND=mongo (shell env,
+  # e.g. `PERSISTENCE_BACKEND=mongo docker compose ... up -d --no-deps swap-demo`)
+  # to prove the adapter swap — same spans, same service.name, different adapter
+  # code path. test_service_name_consistent_across_both_backends() in
+  # services/swap-demo/tests/test_observability.py drives this directly.
 
   swap-demo:
     build:
@@ -245,7 +248,7 @@ services:
       dockerfile: Dockerfile
     container_name: openframe-swap-demo
     environment:
-      PERSISTENCE_BACKEND:          postgres
+      PERSISTENCE_BACKEND:          ${PERSISTENCE_BACKEND:-postgres}
       DATABASE_URL:                 postgresql://openframe:openframe@postgres:5432/openframe
       MONGO_URL:                    mongodb://openframe:openframe@mongo:27017
       MONGO_DATABASE:               openframe

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import uuid
 
+from openframe.core.ports import PluginStatus
+
 from src.application.ports.item_repository import ItemRepositoryPort
 from src.domain.item import Item
 
@@ -57,7 +59,6 @@ class ItemService:
         return await self._repo.bulk_import(items)
 
     async def health(self) -> dict:
-        return {
-            "ping": await self._repo.ping(),
-            "is_ready": await self._repo.is_ready(),
-        }
+        health = await self._repo.health()
+        ready = health.status == PluginStatus.READY
+        return {"ping": ready, "is_ready": ready}

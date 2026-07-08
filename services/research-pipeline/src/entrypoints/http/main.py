@@ -1,8 +1,9 @@
 """
 FastAPI application entry point.
 
-Three-plugin PluginRegistry lifecycle managed in lifespan.
-Background Kafka consumer started after all plugins initialise.
+Three-plugin lifecycle managed by ResearchPipelineApp (ApplicationBootstrap),
+via src.bootstrap.dependencies. Background Kafka consumer started after all
+plugins initialise; its lifecycle (start/cancel) is owned by the app instance.
 """
 from __future__ import annotations
 
@@ -61,12 +62,10 @@ async def lifespan(app: FastAPI):
     setup_telemetry()
     record_lifecycle_event("cold_start")
 
-    task: asyncio.Task | None = None
     try:
         await dependencies.initialise()
         _logger.info("research-pipeline: all adapters ready")
-        task = asyncio.create_task(_consumer_task())
-        dependencies._consumer_task = task
+        await dependencies.start_consumer(_consumer_task)
     except (AdapterConnectionError, ValidationError) as exc:
         _logger.warning(
             "research-pipeline: one or more backends not ready at startup: %s "
@@ -119,6 +118,6 @@ async def pipeline_info():
             {"order": 3, "capability": "queue",       "backend": "Kafka",
              "role": "event bus — async processing"},
         ],
-        "wiring": "Stage 2 — PluginRegistry",
+        "wiring": "Stage 2 — ApplicationBootstrap",
         "pattern": "ingest → store (mongo) → publish (kafka) → cache status (redis)",
     }

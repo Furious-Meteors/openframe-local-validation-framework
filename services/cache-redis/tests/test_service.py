@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+from openframe.core.ports import PluginHealth, PluginStatus
+
 from src.domain.session import Session
 
 
@@ -60,7 +62,6 @@ async def test_get_stats_delegates_to_repo(service, mock_repo):
 
 
 async def test_health_returns_ping_and_ready(service, mock_repo):
-    mock_repo.ping.return_value = True
-    mock_repo.is_ready.return_value = True
+    mock_repo.health.return_value = PluginHealth(status=PluginStatus.READY)
     result = await service.health()
     assert result == {"ping": True, "is_ready": True}

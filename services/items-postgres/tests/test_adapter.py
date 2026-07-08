@@ -2,7 +2,7 @@
 Tests for ItemPostgresRepository.
 
 Proves the adapter:
-- Satisfies BaseRepository and HealthCheck protocols
+- Satisfies BaseRepository and Lifecycle protocols
 - Maps asyncpg records to Item domain objects correctly
 - Accesses raw asyncpg for niche features (find_by_status, bulk_import)
 - Translates asyncpg errors to AdapterError subclasses
@@ -16,8 +16,7 @@ import asyncpg
 import pytest
 
 from openframe.core.exceptions import AdapterQueryError, AdapterTimeoutError
-from openframe.core.health import HealthCheck
-from openframe.core.ports import BaseRepository
+from openframe.core.ports import BaseRepository, Lifecycle
 
 from src.adapters.outbound.item_repository import ItemPostgresRepository
 from src.domain.item import Item
@@ -32,7 +31,7 @@ def test_adapter_satisfies_base_repository(adapter):
 
 def test_adapter_satisfies_health_check(adapter):
     repo, _, _ = adapter
-    assert isinstance(repo, HealthCheck)
+    assert isinstance(repo, Lifecycle)
 
 
 def test_adapter_table_is_items(adapter):

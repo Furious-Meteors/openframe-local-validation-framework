@@ -27,7 +27,7 @@ def mock_repo():
     repo = MagicMock()
     repo.save   = AsyncMock()
     repo.get    = AsyncMock(return_value=None)
-    repo.list   = AsyncMock(return_value=[])
+    repo.list   = AsyncMock(return_value=([], 0))
     repo.delete = AsyncMock(return_value=False)
     return repo
 

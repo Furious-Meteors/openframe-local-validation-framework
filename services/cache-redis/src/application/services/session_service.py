@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from openframe.core.ports import PluginStatus
+
 from src.application.ports.session_repository import SessionRepositoryPort
 from src.domain.session import Session
 
@@ -47,7 +49,6 @@ class SessionService:
         return await self._repo.get_stats()
 
     async def health(self) -> dict:
-        return {
-            "ping":     await self._repo.ping(),
-            "is_ready": await self._repo.is_ready(),
-        }
+        health = await self._repo.health()
+        ready = health.status == PluginStatus.READY
+        return {"ping": ready, "is_ready": ready}

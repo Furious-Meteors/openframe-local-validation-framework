@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from openframe.core.middleware import TelemetryMiddleware
-from openframe.core.telemetry import record_lifecycle_event, setup_telemetry
+from openframe.core.telemetry import record_lifecycle_event, setup_telemetry, shutdown_telemetry
 
 from pydantic import ValidationError
 
@@ -90,6 +90,7 @@ async def lifespan(app: FastAPI):
             pass
 
     await dependencies.shutdown()
+    shutdown_telemetry()
 
 
 app = FastAPI(

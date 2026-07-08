@@ -27,7 +27,7 @@ async def test_get_returns_none(service, mock_repo):
 
 async def test_list_returns_items(service, mock_repo, item_factory):
     items = [item_factory(id="1"), item_factory(id="2")]
-    mock_repo.list.return_value = items
+    mock_repo.list.return_value = (items, len(items))
     result = await service.list()
     assert len(result) == 2
 

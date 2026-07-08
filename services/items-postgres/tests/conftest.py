@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from openframe.core.ports import PluginHealth, PluginStatus
 from openframe.core.testing.fixtures import *  # noqa: F401, F403
 
 from src.domain.item import Item
@@ -41,8 +42,7 @@ def mock_repo():
     repo.delete          = AsyncMock(return_value=False)
     repo.find_by_status  = AsyncMock(return_value=[])
     repo.bulk_import     = AsyncMock(return_value=0)
-    repo.ping            = AsyncMock(return_value=True)
-    repo.is_ready        = AsyncMock(return_value=True)
+    repo.health          = AsyncMock(return_value=PluginHealth(status=PluginStatus.READY))
     return repo
 
 

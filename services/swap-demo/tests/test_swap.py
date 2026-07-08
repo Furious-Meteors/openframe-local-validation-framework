@@ -15,7 +15,7 @@ def postgres_repo():
     repo = MagicMock()
     repo.save   = AsyncMock()
     repo.get    = AsyncMock(return_value=SwapItem(id="pg-1", name="Postgres Item"))
-    repo.list   = AsyncMock(return_value=[SwapItem(id="pg-1", name="Postgres Item")])
+    repo.list   = AsyncMock(return_value=([SwapItem(id="pg-1", name="Postgres Item")], 1))
     repo.delete = AsyncMock(return_value=True)
     return repo
 
@@ -25,7 +25,7 @@ def mongo_repo():
     repo = MagicMock()
     repo.save   = AsyncMock()
     repo.get    = AsyncMock(return_value=SwapItem(id="mg-1", name="Mongo Item"))
-    repo.list   = AsyncMock(return_value=[SwapItem(id="mg-1", name="Mongo Item")])
+    repo.list   = AsyncMock(return_value=([SwapItem(id="mg-1", name="Mongo Item")], 1))
     repo.delete = AsyncMock(return_value=True)
     return repo
 

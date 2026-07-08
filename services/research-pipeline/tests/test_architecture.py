@@ -1,8 +1,9 @@
 """
 Architecture tests — hexagonal boundary verification.
 
-Only bootstrap/dependencies.py is allowed to import from openframe.adapters.
-Domain and application layers must be infrastructure-free.
+Only bootstrap/dependencies.py and bootstrap/app.py are allowed to import
+from openframe.adapters. Domain and application layers must be
+infrastructure-free.
 """
 from __future__ import annotations
 
@@ -47,18 +48,28 @@ def test_application_has_no_driver_imports():
 
 def test_bootstrap_imports_all_three_adapter_families():
     """
-    bootstrap/dependencies.py must import from all three adapter packages —
-    this is the one file that wires the three-adapter PluginRegistry.
+    bootstrap/app.py must import from all three adapter packages — its
+    ResearchPipelineApp.configure() is what wires the three-adapter registry.
     """
-    deps = SERVICE_ROOT / "bootstrap" / "dependencies.py"
-    imports = " ".join(_get_imports(deps))
+    app_module = SERVICE_ROOT / "bootstrap" / "app.py"
+    imports = " ".join(_get_imports(app_module))
     assert "openframe.adapters.db.mongo" in imports
     assert "openframe.adapters.db.redis" in imports
     assert "openframe.adapters.queue.kafka" in imports
 
 
-def test_bootstrap_uses_plugin_registry():
-    """Stage 2 wiring — must use PluginRegistry, not three separate lru_cache calls."""
+def test_bootstrap_uses_application_bootstrap():
+    """Stage 2 wiring — must use ApplicationBootstrap, not three separate lru_cache calls."""
+    app_module = SERVICE_ROOT / "bootstrap" / "app.py"
+    imports = " ".join(_get_imports(app_module))
+    assert "openframe.core.runtime" in imports
+
+
+def test_dependencies_does_not_import_adapter_packages_directly():
+    """
+    dependencies.py reads ports through _app.get(Capability.X) — it must not
+    import adapter packages itself; that belongs to app.py's configure().
+    """
     deps = SERVICE_ROOT / "bootstrap" / "dependencies.py"
     imports = " ".join(_get_imports(deps))
-    assert "openframe.core.plugins" in imports
+    assert "openframe.adapters" not in imports
