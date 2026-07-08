@@ -47,20 +47,30 @@ def test_application_has_no_driver_imports():
 
 def test_bootstrap_imports_both_adapter_families():
     """
-    bootstrap/dependencies.py must import from both adapter packages —
-    this is the one file that wires the two-adapter PluginRegistry.
+    bootstrap/app.py must import from both adapter packages — its
+    ItemsCachedApp.configure() is what wires the two-adapter registry.
     """
-    deps = SERVICE_ROOT / "bootstrap" / "dependencies.py"
-    imports = " ".join(_get_imports(deps))
+    app_module = SERVICE_ROOT / "bootstrap" / "app.py"
+    imports = " ".join(_get_imports(app_module))
     assert "openframe.adapters.db.postgres" in imports
     assert "openframe.adapters.db.redis" in imports
 
 
-def test_bootstrap_uses_plugin_registry():
-    """Stage 2 wiring — must use PluginRegistry, not lru_cache."""
+def test_bootstrap_uses_application_bootstrap():
+    """Stage 2 wiring — must use ApplicationBootstrap, not raw PluginRegistry."""
+    app_module = SERVICE_ROOT / "bootstrap" / "app.py"
+    imports = " ".join(_get_imports(app_module))
+    assert "openframe.core.runtime" in imports
+
+
+def test_dependencies_does_not_import_adapter_packages_directly():
+    """
+    dependencies.py reads ports through _app.get(Capability.X) — it must
+    not import adapter packages itself; that belongs to app.py's configure().
+    """
     deps = SERVICE_ROOT / "bootstrap" / "dependencies.py"
     imports = " ".join(_get_imports(deps))
-    assert "openframe.core.plugins" in imports
+    assert "openframe.adapters" not in imports
 
 
 def test_only_bootstrap_imports_adapters():

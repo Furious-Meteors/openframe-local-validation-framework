@@ -70,7 +70,7 @@ def test_only_outbound_and_bootstrap_import_openframe_adapters():
     """
     openframe.adapters may only appear in:
       - src/adapters/outbound/item_repository.py
-      - src/bootstrap/dependencies.py
+      - src/bootstrap/app.py
     Domain and application layers are strictly forbidden.
     """
     forbidden_dirs = {"domain", "application"}
@@ -86,11 +86,29 @@ def test_only_outbound_and_bootstrap_import_openframe_adapters():
 
 
 def test_bootstrap_imports_openframe_adapters():
-    """bootstrap/dependencies.py MUST import from openframe.adapters."""
-    deps = SERVICE_ROOT / "bootstrap" / "dependencies.py"
-    imports = _get_imports(deps)
+    """bootstrap/app.py MUST import from openframe.adapters."""
+    app_module = SERVICE_ROOT / "bootstrap" / "app.py"
+    imports = _get_imports(app_module)
     assert any("openframe.adapters" in i for i in imports), \
-        "bootstrap/dependencies.py should import from openframe.adapters"
+        "bootstrap/app.py should import from openframe.adapters"
+
+
+def test_bootstrap_uses_application_bootstrap():
+    """bootstrap/app.py MUST use ApplicationBootstrap, not lru_cache."""
+    app_module = SERVICE_ROOT / "bootstrap" / "app.py"
+    imports = _get_imports(app_module)
+    assert any("openframe.core.runtime" in i for i in imports), \
+        "bootstrap/app.py should import openframe.core.runtime"
+
+
+def test_dependencies_does_not_import_adapter_packages_directly():
+    """
+    dependencies.py reads the port through _app.get(Capability.X) — it must
+    not import adapter packages itself; that belongs to app.py's configure().
+    """
+    deps = SERVICE_ROOT / "bootstrap" / "dependencies.py"
+    imports = " ".join(_get_imports(deps))
+    assert "openframe.adapters" not in imports
 
 
 def test_outbound_adapter_imports_openframe_adapters():

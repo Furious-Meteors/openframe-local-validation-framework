@@ -15,7 +15,7 @@ import pytest
 def _get_source() -> str:
     path = (
         pathlib.Path(__file__).parent.parent
-        / "src" / "bootstrap" / "dependencies.py"
+        / "src" / "bootstrap" / "app.py"
     )
     return path.read_text()
 

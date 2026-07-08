@@ -1,80 +1,55 @@
 """
-Composition root — Stage 1 wiring with adapter swap.
+Composition root — Stage 1 wiring with adapter swap, ApplicationBootstrap.
 
-One plugin is registered at startup — chosen by PERSISTENCE_BACKEND:
-    postgres (default) → PostgresPlugin  → PostgresSwapRepository
-    mongo              → MongoPlugin     → MongoSwapRepository
+This is the FastAPI dependency layer. Together with
+:class:`~bootstrap.app.SwapDemoApp` (ApplicationBootstrap, which owns the
+conditional plugin registration in its configure()), ``bootstrap/`` is the
+only package that imports from openframe.adapters. This module provides
+``Depends()``-friendly functions that read from the module-level ``_app``
+instance instead of owning the registry directly.
 
-The service (SwapItemService) and all routes are identical for both backends.
-Only this file and the two adapter files know which backend is active.
-
-This is the canonical proof that the hexagonal contract holds:
-the same SwapItemRepository port, satisfied by two different adapter
-implementations, selected entirely at startup without touching any
-service or route code.
+Function names (init_backends/close_backends) are kept as-is rather than
+renamed to initialise()/shutdown() — entrypoints/http/main.py already
+imports these names and there's no reason to churn it during this migration.
 """
 from __future__ import annotations
 
-import os
+from openframe.core.ports   import Capability
+from openframe.core.tracing import TracingProxy
 
-from openframe.adapters.db.mongo    import MongoPlugin, MongoSettings
-from openframe.adapters.db.postgres import PostgresPlugin, PostgresSettings
-from openframe.core.plugins         import PluginRegistry
-from openframe.core.tracing         import TracingProxy
+from application.services.swap_item_service import SwapItemService
+from bootstrap.app import SwapDemoApp
 
-from adapters.outbound.mongo_swap_repository    import MongoSwapRepository
-from adapters.outbound.postgres_swap_repository import PostgresSwapRepository
-from application.services.swap_item_service     import SwapItemService
-
-_BACKEND  = os.getenv("PERSISTENCE_BACKEND", "postgres")
-_registry: PluginRegistry | None = None
+_app: SwapDemoApp = SwapDemoApp()
 
 
 async def init_backends() -> None:
     """
     Register and initialise the active backend plugin.
 
-    Called once in FastAPI lifespan on startup.
-    Only one plugin is registered — the one selected by PERSISTENCE_BACKEND.
+    Called once in FastAPI lifespan on startup. Rebuilds ``_app`` fresh
+    each call so repeated startup/shutdown cycles never re-register a
+    plugin into an already-populated registry.
     """
-    global _registry
-    _registry = PluginRegistry()
-
-    if _BACKEND == "mongo":
-        _registry.register(MongoPlugin(
-            MongoSettings(),
-            collection="swap_items",
-            repository_class=MongoSwapRepository,
-        ))
-    else:
-        _registry.register(PostgresPlugin(
-            PostgresSettings(),
-            table="swap_items",
-            id_column="id",
-            repository_class=PostgresSwapRepository,
-        ))
-
-    await _registry.initialize_all()
+    global _app
+    _app = SwapDemoApp()
+    await _app.start()
 
 
 async def close_backends() -> None:
-    """Shut down the active plugin. Never raises."""
-    if _registry is not None:
-        await _registry.shutdown_all()
+    """Shut down the active plugin and flush telemetry. Never raises."""
+    await _app.stop()
 
 
 def get_swap_item_service() -> SwapItemService:
     """
     FastAPI dependency — injected via Depends(get_swap_item_service).
 
-    Both backends register under capability="persistence", so the lookup
-    is always the same regardless of which plugin is active.
+    Both backends register under Capability.PERSISTENCE, so the lookup is
+    always the same regardless of which plugin is active.
     """
-    if _registry is None:
-        raise RuntimeError("PluginRegistry not initialised.")
-
     repo = TracingProxy(
-        _registry.get("persistence").get_repository(),
+        _app.get(Capability.PERSISTENCE).get_repository(),
         prefix="repository.swap_item",
     )
     return SwapItemService(repo)

@@ -64,14 +64,26 @@ def test_adapters_use_openframe_postgres_or_mongo():
 
 def test_bootstrap_imports_both_adapter_families():
     """
-    bootstrap/dependencies.py must be the single file that imports
-    from both adapter packages and wires the PluginRegistry.
+    bootstrap/app.py must be the single file that imports from both
+    adapter packages and wires ApplicationBootstrap's conditional
+    registration.
+    """
+    app_module = SERVICE_ROOT / "bootstrap" / "app.py"
+    imports = " ".join(_get_imports(app_module))
+    assert "openframe.adapters.db.postgres" in imports
+    assert "openframe.adapters.db.mongo" in imports
+    assert "openframe.core.runtime" in imports
+
+
+def test_dependencies_does_not_import_adapter_packages_directly():
+    """
+    dependencies.py reads the port through _app.get(Capability.PERSISTENCE)
+    — it must not import adapter packages itself; that belongs to app.py's
+    configure().
     """
     deps = SERVICE_ROOT / "bootstrap" / "dependencies.py"
     imports = " ".join(_get_imports(deps))
-    assert "openframe.adapters.db.postgres" in imports
-    assert "openframe.adapters.db.mongo" in imports
-    assert "openframe.core.plugins" in imports
+    assert "openframe.adapters" not in imports
 
 
 def test_entrypoints_have_no_adapter_imports():

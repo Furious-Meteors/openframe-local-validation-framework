@@ -5,27 +5,41 @@ Loads env vars, bootstraps telemetry, adds middleware.
 """
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from pydantic import ValidationError
 
+from openframe.core.exceptions import AdapterConnectionError
 from openframe.core.middleware import TelemetryMiddleware
 from openframe.core.telemetry import record_lifecycle_event, setup_telemetry, shutdown_telemetry
 
-from src.bootstrap.dependencies import _get_settings, get_item_service
+from src.bootstrap import dependencies
+from src.bootstrap.dependencies import get_item_service
 from src.entrypoints.http.routes import router
 
 load_dotenv(override=True)
+_logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_telemetry()
     record_lifecycle_event("cold_start")
-    # Eagerly validate settings at startup — fail fast if DATABASE_URL missing
-    _get_settings()
+
+    try:
+        await dependencies.initialise()
+    except (AdapterConnectionError, ValidationError) as exc:
+        _logger.warning(
+            "items-postgres: Postgres not ready at startup: %s "
+            "— running in degraded mode", exc
+        )
+
     yield
+
+    await dependencies.shutdown()
     shutdown_telemetry()
 
 

@@ -1,38 +1,40 @@
 """
-Composition root — Stage 1 wiring.
+Composition root — Stage 1 wiring, ApplicationBootstrap.
 
-One adapter → lru_cache direct. No PluginRegistry needed.
-
-This is the ONLY file that imports from openframe.adapters.
-Routes and services never see PostgresRepository.
+This is the FastAPI dependency layer. Together with
+:class:`~src.bootstrap.app.ItemsPostgresApp` (ApplicationBootstrap, which
+owns the actual plugin registration in its configure()), ``bootstrap/`` is
+the only package that imports from openframe.adapters. This module provides
+``Depends()``-friendly functions that read from the module-level ``_app``
+instance instead of owning the port directly.
 """
 from __future__ import annotations
 
-from functools import lru_cache
-
-from openframe.adapters.db.postgres import PostgresSettings
+from openframe.core.ports   import Capability
 from openframe.core.tracing import TracingProxy
 
-from src.adapters.outbound.item_repository import ItemPostgresRepository
 from src.application.services.item_service import ItemService
+from src.bootstrap.app import ItemsPostgresApp
+
+_app: ItemsPostgresApp = ItemsPostgresApp()
 
 
-@lru_cache(maxsize=1)
-def _get_settings() -> PostgresSettings:
+async def initialise() -> None:
     """
-    Read and validate settings from env vars once per process.
-    Raises pydantic_core.ValidationError at startup if DATABASE_URL is missing.
+    Configure and initialise the Postgres plugin.
+
+    Called once per FastAPI lifespan startup. Rebuilds ``_app`` fresh each
+    call so repeated startup/shutdown cycles (e.g. one per test TestClient)
+    never re-register a plugin into an already-populated registry.
     """
-    return PostgresSettings()
+    global _app
+    _app = ItemsPostgresApp()
+    await _app.start()
 
 
-@lru_cache(maxsize=1)
-def _get_repository() -> ItemPostgresRepository:
-    """
-    Construct the repository once per process.
-    Pool is created lazily on first DB call via get_postgres_pool().
-    """
-    return ItemPostgresRepository(_get_settings())
+async def shutdown() -> None:
+    """Shut down the plugin and flush telemetry. Never raises."""
+    await _app.stop()
 
 
 def get_item_service() -> ItemService:
@@ -42,5 +44,8 @@ def get_item_service() -> ItemService:
     TracingProxy wraps the repository so every repo method gets a child
     OTel span automatically: repository.item.get, repository.item.create, etc.
     """
-    traced = TracingProxy(_get_repository(), prefix="repository.item")
+    traced = TracingProxy(
+        _app.get(Capability.PERSISTENCE).get_repository(),
+        prefix="repository.item",
+    )
     return ItemService(traced)

@@ -3,6 +3,10 @@ Shared fixtures for items-postgres tests.
 
 OTel reset provided by openframe.core.testing.fixtures.
 All adapter interactions are mocked — zero network calls.
+
+The autouse _test_env fixture sets DATABASE_URL so that PostgresSettings()
+(constructed for real inside ItemsPostgresApp.configure() in
+test_application_bootstrap.py) doesn't raise ValidationError.
 """
 from __future__ import annotations
 
@@ -13,6 +17,11 @@ from openframe.core.ports import PluginHealth, PluginStatus
 from openframe.core.testing.fixtures import *  # noqa: F401, F403
 
 from src.domain.item import Item
+
+
+@pytest.fixture(autouse=True)
+def _test_env(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
 
 
 @pytest.fixture

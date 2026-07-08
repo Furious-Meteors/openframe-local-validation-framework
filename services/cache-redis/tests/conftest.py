@@ -1,3 +1,9 @@
+"""
+The autouse _test_env fixture sets REDIS_URL so that RedisSettings()
+(constructed for real inside CacheRedisApp.__init__/configure() in
+test_application_bootstrap.py, and via TestClient(app) lifespan in
+test_routes.py) doesn't raise ValidationError.
+"""
 from __future__ import annotations
 
 import pytest
@@ -7,6 +13,11 @@ from openframe.core.ports import PluginHealth, PluginStatus
 from openframe.core.testing.fixtures import *  # noqa: F401, F403
 
 from src.domain.session import Session
+
+
+@pytest.fixture(autouse=True)
+def _test_env(monkeypatch):
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
 
 
 @pytest.fixture

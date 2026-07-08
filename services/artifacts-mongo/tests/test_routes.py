@@ -23,19 +23,13 @@ def mock_service():
 
 
 @pytest.fixture
-def client(mock_service, monkeypatch):
-    monkeypatch.setenv("MONGO_URL", "mongodb://test:test@localhost:27017")
-    monkeypatch.setenv("MONGO_DATABASE", "test_db")
-    from src.bootstrap.dependencies import _get_settings, _get_repository, get_artifact_service
-    _get_settings.cache_clear()
-    _get_repository.cache_clear()
+def client(mock_service):
+    from src.bootstrap.dependencies import get_artifact_service
     app.dependency_overrides[get_artifact_service] = lambda: mock_service
     with patch("src.entrypoints.http.main.get_artifact_service", return_value=mock_service):
         with TestClient(app, raise_server_exceptions=True) as c:
             yield c, mock_service
     app.dependency_overrides.clear()
-    _get_settings.cache_clear()
-    _get_repository.cache_clear()
 
 
 def test_health_returns_200(client):

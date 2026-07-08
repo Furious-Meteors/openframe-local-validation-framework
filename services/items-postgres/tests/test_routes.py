@@ -31,18 +31,13 @@ def mock_service():
 
 
 @pytest.fixture
-def client(mock_service, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost/test")
-    from src.bootstrap.dependencies import _get_settings, _get_repository, get_item_service
-    _get_settings.cache_clear()
-    _get_repository.cache_clear()
+def client(mock_service):
+    from src.bootstrap.dependencies import get_item_service
     app.dependency_overrides[get_item_service] = lambda: mock_service
     with patch("src.entrypoints.http.main.get_item_service", return_value=mock_service):
         with TestClient(app, raise_server_exceptions=True) as c:
             yield c, mock_service
     app.dependency_overrides.clear()
-    _get_settings.cache_clear()
-    _get_repository.cache_clear()
 
 
 # ── GET /health ────────────────────────────────────────────────────────────

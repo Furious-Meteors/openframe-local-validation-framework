@@ -75,15 +75,15 @@ async def health():
 @app.get("/registry")
 async def registry_info():
     """
-    Shows registered plugins and their capabilities.
+    Shows registered plugins and their lifecycle status.
 
-    Proves the PluginRegistry is managing both adapters.
+    Proves ApplicationBootstrap is managing both adapters.
+    list_plugins() returns a PluginHealth snapshot per port (status +
+    message=plugin name) — not the plugin instances themselves, so no
+    per-plugin capability is exposed here.
     """
-    from src.bootstrap.dependencies import _registry
-    if _registry is None:
-        return {"plugins": [], "wiring": "Stage 2 — PluginRegistry"}
-    plugins = _registry.list_plugins()
+    plugins = dependencies.list_plugins()
     return {
-        "plugins": [{"capability": p.capability, "name": type(p).__name__} for p in plugins],
-        "wiring":  "Stage 2 — PluginRegistry",
+        "plugins": [{"name": p.message, "status": p.status.name} for p in plugins],
+        "wiring":  "Stage 2 — ApplicationBootstrap",
     }

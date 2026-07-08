@@ -4,6 +4,137 @@ All notable changes to the Stage 8 sidecar telemetry validation work in this rep
 
 ---
 
+## [Unreleased] — ApplicationBootstrap Migration + Collector Self-Heal (2026-07-08)
+
+### Summary
+
+Migrated all six remaining services (`items-postgres`, `artifacts-mongo`, `cache-redis`, `events-kafka`, `items-cached`, `swap-demo`) from their prior composition-root patterns (`@lru_cache` factories, module-level globals, or raw `PluginRegistry`) to `ApplicationBootstrap` from `openframe-core`, matching the pattern already proven in `research-pipeline`. Each service was migrated, unit-tested, rebuilt in Docker, and re-verified against Stage 8 telemetry individually before moving to the next. Along the way, found and fixed a Docker Compose sidecar networking bug that silently breaks telemetry on every rebuild, and two capability gaps in `openframe-adapters` plugins that would have caused runtime regressions if migrated naively.
+
+---
+
+## Architecture decisions
+
+### AD-18 — Every service gets `bootstrap/app.py` (new) + a thin `bootstrap/dependencies.py`
+
+**Decision:** `bootstrap/app.py` defines a `<Service>App(ApplicationBootstrap)` subclass whose `configure()` registers all plugins for that service; it is the only file (besides outbound adapters) that imports `openframe.adapters.*` and the only file that imports `openframe.core.runtime`. `bootstrap/dependencies.py` holds a module-level `_app` instance, rebuilt fresh inside `initialise()`/`init_backends()` on every FastAPI lifespan startup (test isolation, no other reset fixture needed), and exposes `Depends()`-friendly functions reading through `_app.get(Capability.X)`.
+
+**Rationale:** Mirrors `research-pipeline`'s already-proven split. Keeps `TracingProxy` wrapping manual and inline in `dependencies.py`'s `get_*_service()` factories — `ApplicationBootstrap`/`PluginRegistry` never apply tracing automatically, confirmed by grepping `openframe-core` for `TracingProxy` (zero matches outside its own definition).
+
+**New architecture-test assertions per service:** `test_bootstrap_imports_openframe_adapters` (retargeted from `dependencies.py` to `app.py`), `test_bootstrap_uses_application_bootstrap` (`app.py` imports `openframe.core.runtime`), `test_dependencies_does_not_import_adapter_packages_directly` (`dependencies.py` has zero `openframe.adapters` imports). `cache-redis` and `events-kafka` had no `test_architecture.py` at all before this migration — both gained one, in scope rather than deferred, since the whole point of the new assertions is proving the boundary this migration establishes.
+
+---
+
+### AD-19 — `RedisPlugin` and `KafkaPlugin.make_consumer()` bypassed for domain subclasses
+
+**Decision:** `RedisPlugin` (`openframe-adapters-db-redis` 2.0.1) has no `repository_class=` parameter — unlike `PostgresPlugin`/`MongoPlugin`, `get_repository()` always returns the base `RedisRepository`, never a domain subclass. Similarly, `KafkaPlugin.make_consumer()` always constructs the base `KafkaConsumer`, never honouring `producer_class`-style subclassing (its own docstring flags this as a known follow-up).
+
+For `cache-redis`, this would have been a hard regression: `SessionRedisRepository.extend_ttl()`/`get_stats()` back real endpoints (`PUT /sessions/{id}/extend`, `GET /sessions/stats`) that don't exist on the base class — `AttributeError` at request time. `RedisPlugin` is still registered via `ApplicationBootstrap` for lifecycle (`initialize()`/`shutdown()`/`health()`), but `dependencies.py` constructs `SessionRedisRepository` directly against the app's own settings for actual use; the connection pool is shared transparently since `openframe`'s Redis client cache is keyed by `redis_url`. Verified live — `extend`/`stats` endpoints hit and confirmed working post-migration.
+
+For `events-kafka`, `OrderEventConsumer._deserialise()` (`OrderEvent.model_validate_json(data)`) would have been silently replaced by the base class's `json.loads()`, handing the background consumer task raw dicts instead of typed events. `dependencies.make_consumer()` constructs `OrderEventConsumer` directly against the app's settings instead of delegating to `KafkaPlugin.make_consumer()`.
+
+`items-cached`'s Redis cache layer has the identical `RedisPlugin` gap (its `ItemRedisRepository._dict_to_entity()` override is silently discarded too), but this was **left unchanged** rather than "fixed" — `ItemCachedService` never calls a Redis-specific extra method, and the resulting raw-dict-on-cache-hit behaviour already existed pre-migration (masked by FastAPI's response-model coercion). Applying the `cache-redis` workaround here would have changed behaviour that wasn't broken; the plan's "preserve behaviour exactly" principle took priority over "fix every instance of the gap."
+
+**Rationale for not patching `openframe-adapters` directly:** decided with the user — a local workaround ships today with zero behaviour change and no cross-repo review/versioning; upstream `repository_class=`/consumer-subclass support for `RedisPlugin`/`KafkaPlugin.make_consumer()` remains a legitimate follow-up for that repo.
+
+---
+
+### AD-20 — `swap-demo`'s conditional single-plugin `configure()`
+
+**Decision:** `SwapDemoApp.__init__` reads `PERSISTENCE_BACKEND` once (`self._backend = os.getenv(...)`), and `configure()` registers **exactly one** of `PostgresPlugin`/`MongoPlugin` based on it — never both. Reading in `__init__` rather than at module-import time or inside `configure()` itself matters because `SwapDemoApp` instances are rebuilt fresh per `init_backends()` call (same pattern as every other migrated service); module-import-time reads would freeze the value to whatever was set the first time the module was ever imported in-process, breaking `monkeypatch.setenv()` in tests.
+
+**Rejected alternative:** registering both plugins unconditionally and selecting one via `get_all()`. Rejected because it would call `.initialize()` on both, opening a live connection to the backend **not** in use — a real resource-cost regression that breaks the service's own stated invariant ("only one backend's connection is ever opened").
+
+**Confirmed no in-process backend-flipping requirement exists:** `test_service_name_consistent_across_both_backends` (the only test exercising both backends) always does a full `docker compose up -d --no-deps swap-demo` container recreate with a modified env dict — never mutates a running process's env — so construction-time reads are safe. Verified live: the test passes, including its own internal container-recreate cycle.
+
+---
+
+### AD-21 — `validate_all.sh` pre-flight check for stale collector network namespaces (root cause: `network_mode: "service:<app>"` binds to a container **ID**, not a service name, at the sidecar's own creation time)
+
+**Decision:** Added a pre-flight section to `scripts/validate_all.sh`, run immediately before Stage 8, that compares `docker inspect <app> --format '{{.Id}}'` against `docker inspect <app>-collector --format '{{.HostConfig.NetworkMode}}'` for all seven services. On a mismatch, it logs which collector is stale and self-heals via `docker compose up -d --force-recreate <service>-collector` before continuing.
+
+**Root cause this guards against:** `network_mode: "service:<app>"` (AD-2) is resolved to a **concrete container ID** at the collector's own creation time — it does not dynamically track "whichever container is currently running that service." Rebuilding just the app (`docker compose up -d --build <service>`, or any `--force-recreate`/`--no-deps` of the app alone) gives it a new container ID the already-running collector doesn't follow: the collector is left attached to a dead network namespace. The app keeps serving HTTP traffic normally (this is silent — no health check catches it), but its OTLP exports to `localhost:4318` hit `Connection refused` inside the orphaned namespace, so **zero** spans ever reach the collector. Undetected, this surfaces ~30s later as an opaque "no spans appeared" Stage 8 timeout with no hint at the real cause.
+
+**Where this bit during the ApplicationBootstrap migration:** every one of the six services rebuilt in this session hit this exact failure mode the first time its collector wasn't also force-recreated — expected and now routine (`docker compose up -d --build <service> && docker compose up -d --force-recreate <service>-collector` after every app rebuild).
+
+**Where it bit a second time, requiring a code fix:** `swap-demo`'s new `test_service_name_consistent_across_both_backends` (Stage 8) recreates the `swap-demo` app container mid-test via `docker compose up -d --no-deps swap-demo` to flip `PERSISTENCE_BACKEND` — reproducing the same bug from *inside* a test run, with no `validate_all.sh` pre-flight to catch it. Fixed in `services/swap-demo/tests/test_observability.py`'s `_restart_with_backend()`: it now also `--force-recreate`s `swap-demo-collector` immediately after the app restart, making the test self-healing rather than dependent on whatever state a prior run left behind.
+
+**Verified by deliberate reproduction:** manually desynced `items-postgres-collector` (`docker compose up -d --force-recreate --no-deps items-postgres`, confirmed container-ID mismatch by hand), ran `validate_all.sh`, watched the pre-flight catch and heal it, then confirmed a second run was a clean no-op.
+
+---
+
+## Detailed bugs and issues (continued)
+
+#### BUG-22 · High · All Docker-rebuilt services · Silent telemetry loss after app-only rebuild
+
+- **Symptom:** `docker compose up -d --build <service>` completes successfully, the app reports healthy and serves HTTP traffic correctly, but Stage 8 tests time out with "No spans appeared within 30s" / "No correlated trace appeared" — with zero clue from the error message that the *collector*, not the app, is the broken half.
+- **Root cause:** `network_mode: "service:<app>"` resolves to the app's container ID at the *collector's* creation time (AD-2), not dynamically. An app-only rebuild changes that ID; the collector isn't automatically recreated to follow it, leaving it bound to a dead network namespace. App-side `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` calls then hit `Connection refused` inside the orphaned namespace.
+- **Fix:** `docker compose up -d --force-recreate <service>-collector` after every app rebuild; automated as a pre-flight self-heal in `validate_all.sh` (AD-21).
+
+---
+
+#### BUG-23 · Medium · `cache-redis` / `events-kafka` · Domain-subclass overrides silently discarded by plugin defaults
+
+- **Symptom (would-have-been, caught before shipping):** Migrating `cache-redis` to a naive `RedisPlugin(RedisSettings())` `configure()` would have made `PUT /sessions/{id}/extend` and `GET /sessions/stats` raise `AttributeError` — `RedisPlugin.get_repository()` returns the base `RedisRepository`, which lacks `extend_ttl()`/`get_stats()` entirely. The equivalent issue in `events-kafka` would have handed the background consumer task raw dicts instead of typed `OrderEvent` objects (silent, not crash-loud).
+- **Root cause:** `RedisPlugin` has no `repository_class=` parameter; `KafkaPlugin.make_consumer()` always constructs the base `KafkaConsumer`, not `producer_class`-style subclassing. Confirmed against both the pip-installed package and the `openframe-adapters` source checkout — not a version-skew issue, a real gap in those two plugins relative to `PostgresPlugin`/`MongoPlugin`/`KafkaPlugin.get_producer()`.
+- **Fix:** Both plugins still registered via `ApplicationBootstrap` for lifecycle management; the actual domain repository/consumer instances are constructed directly against the app's settings in `dependencies.py`, bypassing the plugin's own accessor. See AD-19.
+
+---
+
+#### BUG-24 · Low · `items-cached` · `/registry` debug endpoint was already dead code pre-migration
+
+- **Symptom:** `GET /registry` would have raised `AttributeError: 'PluginHealth' object has no attribute 'capability'` if ever exercised — not covered by `validate_all.sh`'s 35 HTTP checks or any existing test.
+- **Root cause:** `PluginRegistry.list_plugins()` returns `PluginHealth` snapshots (`.status`, `.message`) — not plugin instances — but the endpoint's original code (`p.capability`, `type(p).__name__`) assumed the latter. Pre-existing bug, unrelated to this migration; only surfaced because the endpoint's `_registry` reach-in had to be fixed anyway (the global no longer exists after the `ApplicationBootstrap` rewrite).
+- **Fix:** Rewrote the endpoint to use the fields `PluginHealth` actually has (`p.message`, `p.status.name`), and added a `list_plugins()` wrapper in `dependencies.py` so `main.py` no longer reaches into a private module-level attribute across the boundary. Verified live — returns real JSON now.
+
+---
+
+## What was built (this session)
+
+### Per-service migration (all six verified: unit tests → Docker rebuild → collector recreate → Stage 8)
+
+| Service | Wiring before | New files | Notable deviation |
+|---|---|---|---|
+| `items-postgres` | `@lru_cache` (Stage 1) | `bootstrap/app.py`, `tests/test_application_bootstrap.py` | Template service; also added the `try/except (AdapterConnectionError, ValidationError)` degraded-mode guard around `dependencies.initialise()` that Postgres/Mongo/Redis eager-connect now requires (previously lazy pool creation meant no explicit init call existed at all) |
+| `artifacts-mongo` | `@lru_cache` (Stage 1) | same shape | Mechanical repeat |
+| `cache-redis` | `@lru_cache` (Stage 1) | same shape + new `test_architecture.py` | `RedisPlugin` workaround (AD-19) |
+| `events-kafka` | module globals + manual async init (Stage 1) | same shape + new `test_architecture.py` | Manual `await _producer.start()` removed — `KafkaPlugin.initialize()` already does it; `make_consumer()` workaround (AD-19) |
+| `items-cached` | raw `PluginRegistry` (Stage 2) | `bootstrap/app.py`, `tests/test_application_bootstrap.py` | `/registry` endpoint fix (BUG-24); `test_plugin_wiring.py` retargeted to `app.py` |
+| `swap-demo` | raw `PluginRegistry`, conditional single-plugin (Stage 1) | same shape + parametrized bootstrap tests | Conditional `configure()` (AD-20); `test_observability.py`'s live backend-flip test made collector-self-healing (AD-21) |
+
+### Tooling
+
+- **`scripts/validate_all.sh`** — new "Pre-flight: collector network alignment" section before Stage 8 (AD-21); `_run_stage8()` calls collapsed into a loop over one shared `_STAGE8_SERVICES` array instead of seven hand-written lines, so the service list can't drift between the pre-flight and Stage 8 sections.
+- **`services/swap-demo/tests/test_observability.py`** — `_restart_with_backend()` now force-recreates `swap-demo-collector` after every app restart (AD-21).
+
+---
+
+## Verification status (last live run, 2026-07-08)
+
+| Stage | Result |
+|---|---|
+| Unit tests, all 7 services | 305+ passed, 0 failed (58 + 46 + 44 + 41 + 67 + 34 + 67 across items-postgres/artifacts-mongo/cache-redis/events-kafka/items-cached/swap-demo/research-pipeline) |
+| HTTP checks (`validate_all.sh`) | 35/35 passed |
+| Pre-flight collector alignment | Passed — 0 stale sidecars on last run, self-heal verified via deliberate reproduction |
+| Stage 8, all 7 services | 30/30 tests passed, including `swap-demo`'s live `PERSISTENCE_BACKEND` container-recreate test |
+
+**To verify end-to-end:**
+
+```bash
+bash scripts/validate_all.sh
+```
+
+---
+
+## Files touched (this session)
+
+**New:** `services/{items-postgres,artifacts-mongo,cache-redis,events-kafka,items-cached,swap-demo}/src/bootstrap/app.py`, `services/{items-postgres,artifacts-mongo,cache-redis,events-kafka,items-cached,swap-demo}/tests/test_application_bootstrap.py`, `services/{cache-redis,events-kafka}/tests/test_architecture.py`
+
+**Rewritten:** `services/{items-postgres,artifacts-mongo,cache-redis,events-kafka,items-cached,swap-demo}/src/bootstrap/dependencies.py`
+
+**Modified:** `services/{items-postgres,artifacts-mongo,cache-redis,events-kafka,items-cached}/src/entrypoints/http/main.py` (degraded-mode init guard, or `/registry` fix for `items-cached`), `services/{items-postgres,artifacts-mongo,cache-redis,items-cached,swap-demo}/tests/test_architecture.py`, `services/{items-postgres,artifacts-mongo,cache-redis}/tests/conftest.py` (autouse env fixture), `services/{items-postgres,artifacts-mongo,cache-redis}/tests/test_routes.py` (removed stale `lru_cache`-era reach-ins), `services/items-cached/tests/test_plugin_wiring.py` (retargeted to `app.py`), `services/swap-demo/tests/test_observability.py`, `scripts/validate_all.sh`
+
+---
+
 ## [Unreleased] — Stage 8: Sidecar Telemetry Validation (2026-06-24)
 
 ### Summary

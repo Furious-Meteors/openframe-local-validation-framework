@@ -22,18 +22,13 @@ def mock_service():
 
 
 @pytest.fixture
-def client(mock_service, monkeypatch):
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
-    from src.bootstrap.dependencies import _get_settings, _get_repository, get_session_service
-    _get_settings.cache_clear()
-    _get_repository.cache_clear()
+def client(mock_service):
+    from src.bootstrap.dependencies import get_session_service
     app.dependency_overrides[get_session_service] = lambda: mock_service
     with patch("src.entrypoints.http.main.get_session_service", return_value=mock_service):
         with TestClient(app, raise_server_exceptions=True) as c:
             yield c, mock_service
     app.dependency_overrides.clear()
-    _get_settings.cache_clear()
-    _get_repository.cache_clear()
 
 
 def test_health_returns_200(client):

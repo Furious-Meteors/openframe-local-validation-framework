@@ -1,3 +1,9 @@
+"""
+The autouse _test_env fixture sets MONGO_URL/MONGO_DATABASE so that
+MongoSettings() (constructed for real inside ArtifactsMongoApp.configure()
+in test_application_bootstrap.py, and via TestClient(app) lifespan in
+test_routes.py) doesn't raise ValidationError.
+"""
 from __future__ import annotations
 
 import pytest
@@ -7,6 +13,12 @@ from openframe.core.ports import PluginHealth, PluginStatus
 from openframe.core.testing.fixtures import *  # noqa: F401, F403
 
 from src.domain.artifact import EmbeddingStatus, ResearchArtifact
+
+
+@pytest.fixture(autouse=True)
+def _test_env(monkeypatch):
+    monkeypatch.setenv("MONGO_URL", "mongodb://test:test@localhost:27017")
+    monkeypatch.setenv("MONGO_DATABASE", "test_db")
 
 
 @pytest.fixture

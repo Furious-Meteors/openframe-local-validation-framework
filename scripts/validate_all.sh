@@ -131,9 +131,58 @@ echo ""
 # ── Stage 8 — sidecar telemetry (requires docker-compose stack) ──────────────
 # One sidecar per service. Each test_observability.py is run only when its
 # companion collector container is confirmed running.
-echo "--- Stage 8: sidecar telemetry ---"
 
 _REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+_STAGE8_SERVICES=(items-postgres artifacts-mongo cache-redis events-kafka swap-demo items-cached research-pipeline)
+
+# Pre-flight: collector network-namespace alignment.
+#
+# Every <service>-collector uses `network_mode: service:<service>`, which
+# Docker resolves to a concrete container ID at the COLLECTOR's own creation
+# time — not dynamically at runtime. Rebuilding/recreating just the app
+# container (e.g. `docker compose up -d --build items-postgres`) gives it a
+# new container ID that the already-running collector does not follow: it's
+# left attached to a dead network namespace. The app keeps serving requests
+# normally (this is silent), but its OTLP exports to localhost:4318 hit
+# connection-refused inside the orphaned namespace, so no spans ever reach
+# the collector. Left undetected, this surfaces 30s later as an opaque
+# "no spans appeared" failure in Stage 8 with no hint at the real cause.
+# Detect the container-ID mismatch here and self-heal by recreating the
+# collector before Stage 8 runs, since app/collector recreation only touches
+# local containers and is safe to repeat.
+echo "--- Pre-flight: collector network alignment ---"
+
+_check_collector_alignment() {
+    local service="$1"
+    local app="openframe-${service}"
+    local collector="openframe-${service}-collector"
+
+    # Not up yet on either side — _run_stage8 will skip this service later.
+    docker inspect "$app" &>/dev/null || return 0
+    docker inspect "$collector" &>/dev/null || return 0
+
+    local app_id collector_ns
+    app_id=$(docker inspect "$app" --format '{{.Id}}')
+    collector_ns=$(docker inspect "$collector" --format '{{.HostConfig.NetworkMode}}')
+    collector_ns="${collector_ns#container:}"
+
+    if [ "$app_id" != "$collector_ns" ]; then
+        echo -e "  ${RED}stale${NC} ${collector} is bound to a dead network namespace (its app container was rebuilt since)"
+        echo "        recreating ${collector} to reattach it to the current ${app}..."
+        docker compose -f "${_REPO_ROOT}/.docker/docker-compose.yml" up -d --force-recreate "${service}-collector" >/dev/null \
+            || fail "Failed to recreate ${collector} — recreate it manually: docker compose -f .docker/docker-compose.yml up -d --force-recreate ${service}-collector"
+        sleep 2
+    fi
+}
+
+for _svc in "${_STAGE8_SERVICES[@]}"; do
+    _check_collector_alignment "$_svc"
+done
+pass "collector network alignment (stale sidecars, if any, were recreated)"
+echo ""
+
+echo "--- Stage 8: sidecar telemetry ---"
+
 _STAGE8_ANY_RAN=false
 _STAGE8_ALL_SKIPPED=true
 
@@ -161,13 +210,9 @@ _run_stage8() {
     fi
 }
 
-_run_stage8 "items-postgres"
-_run_stage8 "artifacts-mongo"
-_run_stage8 "cache-redis"
-_run_stage8 "events-kafka"
-_run_stage8 "swap-demo"
-_run_stage8 "items-cached"
-_run_stage8 "research-pipeline"
+for _svc in "${_STAGE8_SERVICES[@]}"; do
+    _run_stage8 "$_svc"
+done
 
 if [ "$_STAGE8_ALL_SKIPPED" = "true" ]; then
     echo ""

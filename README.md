@@ -43,11 +43,14 @@ docker compose -f .docker/docker-compose.yml ps
 bash scripts/validate_all.sh
 ```
 
-After changing service code (especially `bootstrap/dependencies.py`), rebuild affected containers:
+After changing service code (especially `bootstrap/app.py` or `bootstrap/dependencies.py`), rebuild affected containers — **and force-recreate that service's collector sidecar too**, or telemetry silently stops (see [Stage 8 details](#stage-8-details)):
 
 ```bash
 docker compose -f .docker/docker-compose.yml up -d --build events-kafka research-pipeline swap-demo
+docker compose -f .docker/docker-compose.yml up -d --force-recreate events-kafka-collector research-pipeline-collector swap-demo-collector
 ```
+
+`validate_all.sh` runs a pre-flight check before Stage 8 that detects and self-heals any collector left behind by a rebuild like this, so a manual `--force-recreate` is a nice-to-have before running it directly — but required if you're hitting a service's `/health` or Stage 8 tests standalone right after a rebuild.
 
 **Stack layout:** 4 infrastructure backends (Postgres, Mongo, Redis, Kafka) · 7 FastAPI app containers (ports 8001–8007) · 7 OTel Collector sidecars (one per app, no shared gateway). See [Stage 8 details](#stage-8-details) and [`.github/CHANGELOG.md`](.github/CHANGELOG.md) for architecture decisions and the full bug/fix history from live validation.
 
@@ -81,18 +84,20 @@ bash scripts/validate_all.sh
 | `cache-redis` | 8003 | 1 + 8 | `openframe-adapters-db-redis` | `RedisRepository[T]` · `EXPIRE` TTL · `PIPELINE` stats · sidecar OTLP |
 | `events-kafka` | 8004 | 1 + 8 | `openframe-adapters-queue-kafka` | `KafkaProducer[T]` · `KafkaConsumer[T]` · keyed publish · sidecar OTLP |
 | `swap-demo` | 8005 | 1 + 8 | Postgres **or** Mongo | Adapter swap via `PERSISTENCE_BACKEND` · sidecar OTLP |
-| `items-cached` | 8006 | 2 + 8 | Postgres + Redis | Cache-aside · two-plugin `PluginRegistry` · dual-adapter trace pooling |
+| `items-cached` | 8006 | 2 + 8 | Postgres + Redis | Cache-aside · two-plugin `ApplicationBootstrap` · dual-adapter trace pooling |
 | `research-pipeline` | 8007 | 2 + 8 | Mongo + Redis + Kafka | Three-adapter orchestration via `ApplicationBootstrap` · triple-adapter trace pooling · sidecar OTLP |
 
-**Stage 1** — single adapter, `lru_cache` wiring or `PluginRegistry` with one plugin.  
-**Stage 2** — multiple adapters simultaneously. `items-cached` uses `PluginRegistry` directly; `research-pipeline` uses `ApplicationBootstrap` (see below) — the recommended composition root as of openframe-core 3.1.0, wrapping `PluginRegistry` with a structured `configure → start → stop` lifecycle and correct shutdown ordering.  
+**Stage 1** — single adapter, one plugin registered via `ApplicationBootstrap`.  
+**Stage 2** — multiple adapters simultaneously, also via `ApplicationBootstrap`.  
 **Stage 8** — sidecar telemetry: every service has its own OTel Collector sidecar (not a shared gateway), real OTLP round-trip, file-based span assertions proving resource attributes survive end-to-end.
 
-**`research-pipeline` and `ApplicationBootstrap`** — research-pipeline is the canonical proof of `ApplicationBootstrap`'s multi-adapter lifecycle, migrated ahead of `openframe-cli` scaffolding it as the default. `src/bootstrap/app.py` defines `ResearchPipelineApp(ApplicationBootstrap)`, registering Mongo → Redis → Kafka in `configure()`. This one service now demonstrates, in combination, everything Stage 8 validates:
+**All seven services now use `ApplicationBootstrap`** (`openframe.core.runtime`) as their composition root — `research-pipeline` was the original proof of concept (three adapters, one background consumer); `items-postgres`, `artifacts-mongo`, `cache-redis`, `events-kafka`, `items-cached`, and `swap-demo` were migrated afterward from their earlier `@lru_cache`/module-global/raw-`PluginRegistry` wiring, one service at a time, each individually re-verified against unit tests and live Stage 8 telemetry. Every service's `src/bootstrap/app.py` defines a `<Service>App(ApplicationBootstrap)` subclass whose `configure()` registers that service's plugin(s); `src/bootstrap/dependencies.py` is a thin `Depends()`-friendly facade that reads through `_app.get(Capability.X)`. `research-pipeline` remains the most complete example — three adapters, `Capability`-typed lookup, LIFO shutdown, and a background consumer lifecycle owned by the app subclass:
   a. `ApplicationBootstrap`'s `configure → start → stop` lifecycle, including LIFO port shutdown and aggregated `health()`
   b. `shutdown_telemetry()` integration inside `ApplicationBootstrap.stop()` — spans emitted during port shutdown are flushed before the TracerProvider itself is torn down
   c. The sidecar collector receiving real spans over a real OTLP network round-trip (`test_ingest_produces_spans_with_single_trace_id`, `test_ingest_produces_http_and_adapter_spans`)
   d. Collector failure injection — the sidecar container is actually stopped mid-test to prove the bounded `BatchSpanProcessor` queue drops spans rather than blocking or crashing the pipeline (`test_bounded_queue_drop_not_crash_on_collector_failure`)
+
+**Two adapter-plugin gaps found during the migration** — `RedisPlugin` (unlike `PostgresPlugin`/`MongoPlugin`) has no `repository_class=` parameter, and `KafkaPlugin.make_consumer()` always returns the base `KafkaConsumer`, never a domain subclass. Where a service needs the domain-specific type (`cache-redis`'s `extend_ttl()`/`get_stats()`, `events-kafka`'s consumer `_deserialise()` override), the plugin is still registered via `ApplicationBootstrap` for lifecycle management, but `dependencies.py` constructs the domain repository/consumer directly against the app's settings instead of calling the plugin's own accessor. See [`.github/CHANGELOG.md`](.github/CHANGELOG.md) AD-19 for the full rationale.
 
 ---
 
@@ -108,7 +113,8 @@ src/
 │   └── services/        ← business logic — depends only on port, never on adapter
 ├── adapters/outbound/   ← openframe adapter subclass — only file that touches drivers
 ├── entrypoints/http/    ← FastAPI routes + lifespan
-└── bootstrap/           ← dependencies.py (composition root — wires adapter → service)
+└── bootstrap/           ← app.py (ApplicationBootstrap subclass — registers plugins)
+                            dependencies.py (Depends() facade — reads via _app.get(Capability.X))
 ```
 
 ### Hexagonal boundary
@@ -139,57 +145,64 @@ Three rules enforced by architecture tests in every service:
 
 1. `domain/` and `application/` **never** import from `openframe.adapters`
 2. `adapters/outbound/` is the **only** layer that imports driver-level code
-3. `bootstrap/dependencies.py` is the **only** file that wires adapters to services
+3. `bootstrap/app.py` is the **only** file that imports `openframe.adapters` (besides the outbound adapters themselves) and wires plugins into `ApplicationBootstrap`; `bootstrap/dependencies.py` never imports adapter packages directly — it only reads through `_app.get(Capability.X)`
 
 ---
 
 ## Wiring stages
 
-### Stage 1 — single adapter (`lru_cache` or single-plugin `PluginRegistry`)
+All seven services use `ApplicationBootstrap` (`openframe.core.runtime`) as their composition root. It wraps `PluginRegistry` with a structured `configure → start → stop` lifecycle and handles shutdown ordering automatically: ports are shut down first (LIFO), then `shutdown_telemetry()` flushes the OTel SDK so spans emitted during port shutdown are not silently dropped. `TracingProxy` wrapping is **not** applied automatically by `ApplicationBootstrap` — it stays manual and inline in each service's `dependencies.py`.
+
+### Stage 1 — single adapter, one plugin
 
 Used by: `items-postgres`, `artifacts-mongo`, `cache-redis`, `events-kafka`, `swap-demo`
 
 ```python
-# bootstrap/dependencies.py — items-postgres pattern
-@lru_cache(maxsize=1)
-def _get_repository() -> ItemPostgresRepository:
-    return ItemPostgresRepository(PostgresSettings())
+# bootstrap/app.py — items-postgres pattern
+class ItemsPostgresApp(ApplicationBootstrap):
+    def configure(self) -> None:
+        self.register(PostgresPlugin(PostgresSettings(), table="items", id_column="id",
+                                      repository_class=ItemPostgresRepository))
+
+# bootstrap/dependencies.py — FastAPI Depends() layer, reads from the app instance
+_app: ItemsPostgresApp = ItemsPostgresApp()
+
+async def initialise() -> None:
+    global _app
+    _app = ItemsPostgresApp()
+    await _app.start()
 
 def get_item_service() -> ItemService:
-    return ItemService(TracingProxy(_get_repository(), prefix="repository.item"))
+    traced = TracingProxy(_app.get(Capability.PERSISTENCE).get_repository(), prefix="repository.item")
+    return ItemService(traced)
 ```
 
-### Stage 2 — multiple adapters (`PluginRegistry`)
+`swap-demo` is the one Stage 1 service where `configure()` is conditional — it registers **exactly one** of `PostgresPlugin`/`MongoPlugin`, gated by `PERSISTENCE_BACKEND` read once at `SwapDemoApp.__init__`, never both (registering both would open a live connection to the unused backend).
 
-Used by: `items-cached`
+### Stage 2 — multiple adapters
+
+Used by: `items-cached` (Postgres + Redis), `research-pipeline` (Mongo + Redis + Kafka)
 
 ```python
-# bootstrap/dependencies.py — items-cached pattern
-async def initialise() -> None:
-    global _registry
-    _registry = PluginRegistry()
-    _registry.register(PostgresPlugin(PostgresSettings(), table="items", id_column="id",
-                                       repository_class=ItemPostgresRepository))
-    _registry.register(RedisPlugin(RedisSettings()))
-    await _registry.initialize_all()   # starts both in registration order
+# bootstrap/app.py — items-cached pattern
+class ItemsCachedApp(ApplicationBootstrap):
+    def configure(self) -> None:
+        # Postgres first — items must be persisted before caching
+        self.register(PostgresPlugin(PostgresSettings(), table="items", id_column="id",
+                                      repository_class=ItemPostgresRepository))
+        # Redis second — cache layer depends on persistence being available
+        self.register(RedisPlugin(RedisSettings()))
+
+# bootstrap/dependencies.py
+_app: ItemsCachedApp = ItemsCachedApp()
 
 def get_item_service() -> ItemCachedService:
-    persistence = TracingProxy(_registry.get("persistence").get_repository(), ...)
-    cache       = TracingProxy(_registry.get("cache").get_repository(), ...)
+    persistence = TracingProxy(_app.get(Capability.PERSISTENCE).get_repository(), prefix="repository.item.postgres")
+    cache       = TracingProxy(_app.get(Capability.CACHE).get_repository(), prefix="cache.item.redis")
     return ItemCachedService(persistence=persistence, cache=cache)
 ```
 
-`PluginRegistry` guarantees:
-- Initialisation in registration order
-- Shutdown in reverse order (LIFO)
-- Aggregated health via `health_all()`
-- Capability-keyed lookup (`"persistence"`, `"cache"`, `"queue"`)
-
-### Stage 2 — multiple adapters (`ApplicationBootstrap`)
-
-Used by: `research-pipeline`
-
-As of openframe-core 3.1.0, `ApplicationBootstrap` (in `openframe.core.runtime`) is the recommended composition root for multi-adapter services — it wraps `PluginRegistry` with a structured `configure → start → stop` lifecycle and handles shutdown ordering automatically: ports are shut down first (LIFO), then `shutdown_telemetry()` flushes the OTel SDK so spans emitted during port shutdown are not silently dropped.
+`research-pipeline`'s `ResearchPipelineApp` additionally owns a background consumer's lifecycle on top of the base class:
 
 ```python
 # bootstrap/app.py — research-pipeline pattern
@@ -205,20 +218,16 @@ class ResearchPipelineApp(ApplicationBootstrap):
         await super().stop()          # shuts down ports LIFO, flushes telemetry
         from openframe.core.telemetry import shutdown_telemetry
         shutdown_telemetry()          # after super().stop() — captures shutdown-time spans too
-
-# bootstrap/dependencies.py — FastAPI Depends() layer, reads from the app instance
-_app = ResearchPipelineApp()
-
-def get_pipeline_service() -> ResearchPipelineService:
-    persistence = TracingProxy(_app.get(Capability.PERSISTENCE).get_repository(), ...)
-    cache       = TracingProxy(_app.get(Capability.CACHE).get_repository(), ...)
-    return ResearchPipelineService(persistence=persistence, cache=cache, ...)
 ```
 
-`ApplicationBootstrap` guarantees the same ordering/health/capability-lookup behaviour as `PluginRegistry` (which it wraps), plus:
+`ApplicationBootstrap` guarantees:
+- Initialisation in registration order, shutdown in reverse order (LIFO)
+- Aggregated health via `health()`
+- `Capability`-typed lookup (`Capability.PERSISTENCE`, `Capability.CACHE`, `Capability.QUEUE`) instead of raw strings
 - A single `start()`/`stop()` entry point instead of manually sequencing `initialize_all()`/`shutdown_all()`
-- `Capability`-typed lookup (`Capability.PERSISTENCE` etc.) instead of raw strings
 - Guaranteed `shutdown_telemetry()` on every `stop()`, so services can't forget to flush spans
+
+**Known plugin gaps worked around locally** (not fixable from this repo — see `.github/CHANGELOG.md` AD-19): `RedisPlugin` has no `repository_class=`, and `KafkaPlugin.make_consumer()` always returns the base `KafkaConsumer`. `cache-redis` and `events-kafka` still register these plugins via `ApplicationBootstrap` for lifecycle management, but construct the domain-specific repository/consumer directly against the app's settings in `dependencies.py` rather than through the plugin's own accessor.
 
 ### Stage 8 — sidecar telemetry validation (all services)
 
@@ -242,6 +251,15 @@ Each `<service>-collector` uses `network_mode: "service:<service>"` in docker-co
 A single shared `.docker/collector-config.yaml` is bind-mounted read-only into every sidecar. Config is shared; **data volumes are isolated** per service.
 
 **Cold-start note:** `network_mode: "service:X"` requires `X` to be running first, so the collector always starts *after* the app. A few spans produced during those initial seconds are dropped by the SDK's bounded queue. This is expected — **bounded loss, never blocking**. Apps keep serving traffic regardless of collector availability. You may see `Failed to export traces … Connection refused` in app logs for a few seconds after `docker compose up` — this is normal.
+
+**Rebuild note — the stale-collector trap:** `network_mode: "service:X"` binds to `X`'s **container ID** at the *collector's own creation time*, not dynamically. Rebuilding just the app (`docker compose up -d --build <service>`) gives it a new container ID that the already-running collector does not follow — it's left attached to a dead network namespace. The app keeps serving HTTP traffic normally (silent failure), but zero spans reach the collector until it's force-recreated too:
+
+```bash
+docker compose -f .docker/docker-compose.yml up -d --build <service>
+docker compose -f .docker/docker-compose.yml up -d --force-recreate <service>-collector
+```
+
+`scripts/validate_all.sh` runs a pre-flight check before Stage 8 that detects and self-heals this automatically for all seven services — see [Troubleshooting](#troubleshooting).
 
 **What Stage 8 proves per service**
 
@@ -376,6 +394,20 @@ docker compose -f .docker/docker-compose.yml logs items-postgres-collector
 docker compose -f .docker/docker-compose.yml up -d --force-recreate items-postgres-collector
 ```
 
+### Stage 8 test: "No spans appeared within 30s" after a rebuild
+
+**Symptom:** A service's app container is healthy, `/health` returns 200, but every Stage 8 test for it times out with `No spans appeared` / `No correlated trace appeared` — even though it worked before you last rebuilt.
+
+**Cause:** Its collector sidecar is bound to a dead network namespace — see the "stale-collector trap" note above. The app's OTLP exports hit `Connection refused` inside the orphaned namespace and never reach the collector.
+
+**Fix:**
+
+```bash
+docker compose -f .docker/docker-compose.yml up -d --force-recreate <service>-collector
+```
+
+`bash scripts/validate_all.sh` catches and self-heals this automatically before running Stage 8 — if you're debugging a single service's tests directly with `pytest`, run the force-recreate manually first.
+
 ### Stage 8 test: only `HTTP GET /health` in span delta
 
 **Symptom:** `AssertionError: No trace_id has ≥2 correlated spans … Span names: ['HTTP GET /health']`
@@ -457,7 +489,7 @@ PERSISTENCE_BACKEND=postgres uvicorn entrypoints.http.main:app --port 8005
 PERSISTENCE_BACKEND=mongo    uvicorn entrypoints.http.main:app --port 8005
 ```
 
-Both backends return identical HTTP behaviour through the same routes, the same service, and the same port. Only `bootstrap/dependencies.py` and the two adapter files know which backend is active.
+Both backends return identical HTTP behaviour through the same routes, the same service, and the same port. Only `bootstrap/app.py` (which backend's plugin gets registered) and the two adapter files know which backend is active.
 
 ---
 
@@ -492,6 +524,7 @@ Both backends return identical HTTP behaviour through the same routes, the same 
 - **Niche 1:** `EXPIRE` command for TTL extension (`extend_ttl`)
 - **Niche 2:** Redis `PIPELINE` for atomic multi-command stats aggregation (`get_stats`)
 - `RedisPlugin.capability = "cache"` — validated as the cache tier, not persistence
+- `RedisPlugin` is registered via `ApplicationBootstrap` for lifecycle only — it has no `repository_class=` support, so `SessionRedisRepository` (needed for `extend_ttl()`/`get_stats()`) is constructed directly in `dependencies.py` against the app's settings, sharing the same connection pool
 - **Stage 8:** `cache-redis-collector` sidecar; correlated HTTP + Redis adapter spans
 
 ### `events-kafka` — Stage 1 · Kafka only · Stage 8 sidecar
@@ -503,6 +536,7 @@ Both backends return identical HTTP behaviour through the same routes, the same 
 - **Niche 2:** topic metadata via raw aiokafka producer introspection (`get_topic_metadata`)
 - Background `asyncio.Task` consumer — observable via `GET /events/received`
 - Graceful degraded startup when Kafka is not yet ready (`AdapterConnectionError` caught in lifespan)
+- `KafkaPlugin.make_consumer()` always returns the base `KafkaConsumer` (no domain-subclass support), so `dependencies.make_consumer()` constructs `OrderEventConsumer` directly against the app's settings to keep its `_deserialise()` override
 - **Stage 8:** `TracingProxy` on Kafka producer (`prefix="queue.event"`) required for adapter spans; containerised services use `kafka:29092` bootstrap
 
 ### `swap-demo` — Stage 1 · Postgres **or** Mongo (swappable) · Stage 8 sidecar
@@ -515,10 +549,10 @@ Both backends return identical HTTP behaviour through the same routes, the same 
 - Architecture tests enforce the boundary: only `adapters/outbound/` and `bootstrap/` see `openframe.adapters`
 - **Stage 8:** `TelemetryMiddleware` and `setup_telemetry()` added (previously missing); `swap-demo-collector` sidecar; `test_observability.py` asserts `service.name=swap-demo` regardless of the active backend
 
-### `items-cached` — Stage 2 · Postgres + Redis · Stage 8 sidecar
+### `items-cached` — Stage 2 · Postgres + Redis · `ApplicationBootstrap` · Stage 8 sidecar
 
-- **The canonical Stage 2 service** — two adapters, one `PluginRegistry`
-- `capability="persistence"` (Postgres) and `capability="cache"` (Redis) coexist without collision
+- Two adapters, one `ItemsCachedApp(ApplicationBootstrap)` subclass (`src/bootstrap/app.py`)
+- `Capability.PERSISTENCE` (Postgres) and `Capability.CACHE` (Redis) coexist without collision
 - Cache-aside read pattern: Redis first → on miss, read Postgres and populate Redis
 - Cache invalidation on write: `update_item()` and `delete_item()` delete the Redis key
 - `create_item()` stamps `created_at` at the service layer before persisting — not delegated to DB default
@@ -544,16 +578,16 @@ Both backends return identical HTTP behaviour through the same routes, the same 
 Each service has a full unit test suite. **Zero network calls** — all adapter interactions are mocked via `unittest.mock.AsyncMock`.
 
 ```bash
-cd services/items-postgres    && pytest tests/ -v   # 57 tests
-cd services/artifacts-mongo   && pytest tests/ -v   # 38 tests
-cd services/cache-redis       && pytest tests/ -v   # 31 tests
-cd services/events-kafka      && pytest tests/ -v   # 26 tests
-cd services/swap-demo         && pytest tests/ -v   # 25 tests
-cd services/items-cached      && pytest tests/ -v   # 60 tests
+cd services/items-postgres    && pytest tests/ -v   # 66 tests
+cd services/artifacts-mongo   && pytest tests/ -v   # 46 tests
+cd services/cache-redis       && pytest tests/ -v   # 44 tests
+cd services/events-kafka      && pytest tests/ -v   # 41 tests
+cd services/swap-demo         && pytest tests/ -v   # 34 tests
+cd services/items-cached      && pytest tests/ -v   # 67 tests
 cd services/research-pipeline && pytest tests/ -v   # 67 tests  (unit, zero network)
 ```
 
-**Total: 304 unit tests, zero network calls.**
+**Total: 365 unit tests, zero network calls.** (Grew from 304 during the `ApplicationBootstrap` migration — every service gained a `test_application_bootstrap.py` suite; `cache-redis`/`events-kafka` also gained `test_architecture.py`, which didn't exist before.)
 
 **Stage 8 integration tests** (require the full docker-compose stack — all sidecars, 29 tests total):
 
@@ -577,7 +611,7 @@ cd services/research-pipeline && pytest tests/test_observability.py -v   # 5 tes
 bash scripts/validate_all.sh
 ```
 
-Stage 8 tests are **integration tests** — they call real HTTP endpoints and read real collector output via `docker cp`. They are excluded from the 296 unit-test count above.
+Stage 8 tests are **integration tests** — they call real HTTP endpoints and read real collector output via `docker cp`. They are excluded from the 365 unit-test count above.
 
 Test coverage per service:
 
@@ -613,6 +647,9 @@ Bugs discovered during live Docker validation are locked in as explicit regressi
 | Collector permission denied on spans file | `docker-compose.yml`: `user: "0"` on collectors |
 | Collector crash on `file_storage` extension | Removed from `.docker/collector-config.yaml` |
 | Stage 8 false failure on healthcheck-only span | `_poll_for_correlated_spans()` in all `test_observability.py` files |
+| Stale collector after app-only rebuild — silent zero-span export | `scripts/validate_all.sh` pre-flight self-heal; `swap-demo`'s live backend-flip test force-recreates its own collector |
+| `cache-redis`/`events-kafka` domain-subclass overrides silently discarded by `RedisPlugin`/`KafkaPlugin.make_consumer()` | Domain repository/consumer constructed directly in `dependencies.py`, bypassing the plugin's accessor |
+| `items-cached` `/registry` endpoint dead code (`AttributeError` on `PluginHealth.capability`, never actually exercised) | Rewritten to use `PluginHealth.message`/`.status` |
 | `validate_all.sh` swallowed Stage 8 pytest failures | `_run_stage8()` without subshell |
 
 ---
@@ -635,7 +672,7 @@ All credentials default to `openframe / openframe`. The Postgres schema (`items`
 
 > **Degraded mode:** every service catches `(AdapterConnectionError, ValidationError)` in its FastAPI lifespan. If a backend is unreachable at startup the service logs a warning and continues serving traffic — this is intentional and tested behaviour, not a silent failure.
 
-> **Changelog:** Full Stage 8 architecture decision log (AD-1–AD-17) and bug report (BUG-01–BUG-21): [`.github/CHANGELOG.md`](.github/CHANGELOG.md).
+> **Changelog:** Full architecture decision log (AD-1–AD-21, including the `ApplicationBootstrap` migration and the stale-collector self-heal) and bug report (BUG-01–BUG-24): [`.github/CHANGELOG.md`](.github/CHANGELOG.md).
 
 ---
 
@@ -643,7 +680,7 @@ All credentials default to `openframe / openframe`. The Postgres schema (`items`
 
 | Package | Description |
 |---|---|
-| [`openframe-core`](https://github.com/Furious-Meteors/openframe-core) | Exceptions · ports · telemetry · middleware · `PluginRegistry` — foundation for the entire ecosystem |
+| [`openframe-core`](https://github.com/Furious-Meteors/openframe-core) | Exceptions · ports · telemetry · middleware · `PluginRegistry` · `ApplicationBootstrap` — foundation for the entire ecosystem |
 | [`openframe-adapters`](https://github.com/Furious-Meteors/openframe-adapters) | DB + queue adapters — Postgres · MongoDB · Redis · Kafka |
 | [`openframe-protocol`](https://github.com/Furious-Meteors/openframe-protocol) | WebSocket · SSE · gRPC · MCP · webhooks |
 | [`openframe-infra`](https://github.com/Furious-Meteors/openframe-infra) | Storage · auth · secrets · observability · feature flags |
